@@ -210,54 +210,7 @@ forever:
 			if ok {
 				batch = append(batch, wr)
 				if send && len(batch) >= w.batchSize {
-					ur := make([]*pb.UserRecord, 0)
-					for _, i := range batch[0:w.batchSize] {
-						ur = append(ur, i.UserRecord)
-					}
-					r := &pb.Record{
-						ShardID:     *w.shardID,
-						UserRecords: ur,
-					}
-					m, err := proto.Marshal(r)
-					if err != nil {
-						panic(err)
-					}
-					p := &kinesis.PutRecordInput{
-						PartitionKey:              w.partitionKey,
-						StreamARN:                 w.streamARN,
-						Data:                      m,
-						SequenceNumberForOrdering: sn,
-					}
-
-					o, err := w.kinesisClient.PutRecord(context.TODO(), p)
-					if err != nil {
-						for _, i := range batch {
-							i.Response <- &writeResponse{
-								Err: err,
-							}
-							close(i.Response)
-						}
-					} else {
-						if o.ShardId == w.shardID {
-							batch = batch[w.batchSize:]
-							sn = o.SequenceNumber
-							for _, i := range batch {
-								close(i.Response)
-							}
-						} else {
-							// Although the record is written to KDS
-							// it's written to the wrong shard. We don't
-							// notify Response channel here.
-							// New shardWriter assigned to handle the remapped
-							// partition will eventually report success or
-							// failure.
-							// The key motivation here is to not surface
-							// shard split/merge details to user API.
-							close(w.close)
-							send = false
-							w.invalidations <- w.version
-						}
-					}
+					sn, send = w.sendBatch(batch, sn)
 				}
 			}
 		case r := <-w.drain:
@@ -270,6 +223,58 @@ forever:
 		case <-w.done:
 			close(w.close)
 			break forever
+		}
+	}
+}
+
+func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (*string, bool) {
+	ur := make([]*pb.UserRecord, 0)
+	for _, i := range batch[0:w.batchSize] {
+		ur = append(ur, i.UserRecord)
+	}
+	r := &pb.Record{
+		ShardID:     *w.shardID,
+		UserRecords: ur,
+	}
+	m, err := proto.Marshal(r)
+	if err != nil {
+		panic(err)
+	}
+	p := &kinesis.PutRecordInput{
+		PartitionKey:              w.partitionKey,
+		StreamARN:                 w.streamARN,
+		Data:                      m,
+		SequenceNumberForOrdering: sequenceNumber,
+	}
+
+	o, err := w.kinesisClient.PutRecord(context.TODO(), p)
+	if err != nil {
+		for _, i := range batch {
+			i.Response <- &writeResponse{
+				Err: err,
+			}
+			close(i.Response)
+		}
+		return nil, true
+	} else {
+		if o.ShardId == w.shardID {
+			batch = batch[w.batchSize:]
+			for _, i := range batch {
+				close(i.Response)
+			}
+			return o.SequenceNumber, true
+		} else {
+			// Although the record is written to KDS
+			// it's written to the wrong shard. We don't
+			// notify Response channel here.
+			// New shardWriter assigned to handle the remapped
+			// partition will eventually report success or
+			// failure.
+			// The key motivation here is to not surface
+			// shard split/merge details to user API.
+			close(w.close)
+			w.invalidations <- w.version
+			return nil, false
 		}
 	}
 }
