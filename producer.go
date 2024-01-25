@@ -229,12 +229,12 @@ forever:
 			if ok {
 				batch = append(batch, wr)
 				if send && len(batch) >= w.batchSize {
-					sn, send = w.sendBatch(batch, sn)
+					sn, send, batch = w.sendBatch(batch, sn)
 				}
 			}
 		case <-t.C:
 			if send && len(batch) > 0 {
-				sn, send = w.sendBatch(batch, sn)
+				sn, send, batch = w.sendBatch(batch, sn)
 			}
 			if send {
 				t.Reset(batchTimeoutMS)
@@ -253,14 +253,15 @@ forever:
 	}
 }
 
-func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (*string, bool) {
+func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (*string, bool, []*writeRequest) {
 	ignoredPartitionKey := aws.String("a")
 	ur := make([]*pb.UserRecord, 0)
 	c := w.batchSize
 	if len(batch) < c {
 		c = len(batch)
 	}
-	for _, i := range batch[0:c] {
+	batch = batch[0:c]
+	for _, i := range batch {
 		ur = append(ur, i.UserRecord)
 	}
 	r := &pb.Record{
@@ -287,14 +288,13 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 			}
 			close(i.Response)
 		}
-		return nil, true
+		return sequenceNumber, true, batch[c:]
 	} else {
 		if *o.ShardId == *w.shardID {
-			batch = batch[c:]
 			for _, i := range batch {
 				close(i.Response)
 			}
-			return o.SequenceNumber, true
+			return o.SequenceNumber, true, batch[c:]
 		} else {
 			// Although the record is written to KDS
 			// it's written to the wrong shard. We don't
@@ -306,7 +306,7 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 			// shard split/merge details to user API.
 			close(w.close)
 			w.invalidations <- w.version
-			return nil, false
+			return nil, false, batch
 		}
 	}
 }
