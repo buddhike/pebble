@@ -86,7 +86,7 @@ type shardMapEntry struct {
 }
 
 type shardMap struct {
-	streamArn     *string
+	streamARN     *string
 	version       int
 	request       chan *resolveRequest
 	done          chan struct{}
@@ -119,7 +119,7 @@ func (m *shardMap) build() {
 	m.version++
 	m.entries = m.entries[:0]
 	o, err := m.kc.ListShards(context.TODO(), &kinesis.ListShardsInput{
-		StreamName: m.streamArn,
+		StreamARN: m.streamARN,
 	})
 	if err != nil {
 		panic(err)
@@ -128,7 +128,7 @@ func (m *shardMap) build() {
 		e := shardMapEntry{}
 		e.start.SetString(*s.HashKeyRange.StartingHashKey, 10)
 		e.end.SetString(*s.HashKeyRange.EndingHashKey, 10)
-		e.writer = newShardWriter(m.streamArn, s.ShardId, s.HashKeyRange.StartingHashKey, m.bufferSize, m.batchSize, m.kc, m.done, m.invalidations)
+		e.writer = newShardWriter(m.streamARN, s.ShardId, s.HashKeyRange.StartingHashKey, m.bufferSize, m.batchSize, m.kc, m.done, m.invalidations)
 		go e.writer.Start()
 		m.entries = append(m.entries, e)
 	}
@@ -162,9 +162,9 @@ func (m *shardMap) rebuild() {
 	}
 }
 
-func newShardMap(streamArn string, bufferSize, batchSize int, kc kinesisClient) *shardMap {
+func newShardMap(streamARN string, bufferSize, batchSize int, kc kinesisClient) *shardMap {
 	return &shardMap{
-		streamArn:     &streamArn,
+		streamARN:     &streamARN,
 		request:       make(chan *resolveRequest),
 		done:          make(chan struct{}),
 		invalidations: make(chan int),
@@ -192,7 +192,7 @@ type shardWriter struct {
 	kinesisClient kinesisClient
 	batchSize     int
 	partitionKey  *string
-	streamArn     *string
+	streamARN     *string
 	version       int // Used to identify which iteration of shardMap prep created this shardWriter
 }
 
@@ -221,7 +221,7 @@ forever:
 					}
 					p := &kinesis.PutRecordInput{
 						PartitionKey:              w.partitionKey,
-						StreamARN:                 w.streamArn,
+						StreamARN:                 w.streamARN,
 						Data:                      m,
 						SequenceNumberForOrdering: sn,
 					}
@@ -271,9 +271,9 @@ forever:
 	}
 }
 
-func newShardWriter(streamArn, shardID, partitionKey *string, bufferSize int, batchSize int, kinesisClient kinesisClient, done chan struct{}, invalidations chan int) *shardWriter {
+func newShardWriter(streamARN, shardID, partitionKey *string, bufferSize int, batchSize int, kinesisClient kinesisClient, done chan struct{}, invalidations chan int) *shardWriter {
 	return &shardWriter{
-		streamArn:     streamArn,
+		streamARN:     streamARN,
 		partitionKey:  partitionKey,
 		shardID:       shardID,
 		input:         make(chan *writeRequest, bufferSize),
