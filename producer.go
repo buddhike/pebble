@@ -24,6 +24,7 @@ func (p *Producer) Send(ctx context.Context, partitionKey string, data []byte) e
 }
 
 func (p *Producer) SendWithRecordID(ctx context.Context, partitionKey string, recordID, data []byte) error {
+forever:
 	for {
 		rr := &resolveRequest{
 			partitionKey: partitionKey,
@@ -41,7 +42,9 @@ func (p *Producer) SendWithRecordID(ctx context.Context, partitionKey string, re
 		}
 		select {
 		case m.input <- wr:
+			break forever
 		case <-m.close:
+			continue
 		case <-ctx.Done():
 			return ctx.Err()
 		case wrr := <-wr.Response:
