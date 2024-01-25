@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/buddhike/vegas/pb"
@@ -253,6 +254,7 @@ forever:
 }
 
 func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (*string, bool) {
+	ignoredPartitionKey := aws.String("a")
 	ur := make([]*pb.UserRecord, 0)
 	c := w.batchSize
 	if len(batch) < c {
@@ -270,7 +272,8 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 		panic(err)
 	}
 	p := &kinesis.PutRecordInput{
-		PartitionKey:              w.partitionKey,
+		PartitionKey:              ignoredPartitionKey, // Ignored because we use ExplicitHashKey
+		ExplicitHashKey:           w.partitionKey,
 		StreamARN:                 w.streamARN,
 		Data:                      m,
 		SequenceNumberForOrdering: sequenceNumber,
@@ -286,7 +289,7 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 		}
 		return nil, true
 	} else {
-		if o.ShardId == w.shardID {
+		if *o.ShardId == *w.shardID {
 			batch = batch[c:]
 			for _, i := range batch {
 				close(i.Response)
