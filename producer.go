@@ -128,13 +128,26 @@ func (m *shardMap) build() {
 	if err != nil {
 		panic(err)
 	}
+
+	p := make(map[string]bool)
 	for _, s := range o.Shards {
-		e := shardMapEntry{}
-		e.start.SetString(*s.HashKeyRange.StartingHashKey, 10)
-		e.end.SetString(*s.HashKeyRange.EndingHashKey, 10)
-		e.writer = newShardWriter(m.streamARN, s.ShardId, s.HashKeyRange.StartingHashKey, m.bufferSize, m.batchSize, m.batchTimeoutMS, m.kc, m.done, m.invalidations)
-		go e.writer.Start()
-		m.entries = append(m.entries, e)
+		if s.ParentShardId != nil {
+			p[*s.ParentShardId] = true
+		}
+		if s.AdjacentParentShardId != nil {
+			p[*s.AdjacentParentShardId] = true
+		}
+	}
+
+	for _, s := range o.Shards {
+		if _, ok := p[*s.ShardId]; !ok {
+			e := shardMapEntry{}
+			e.start.SetString(*s.HashKeyRange.StartingHashKey, 10)
+			e.end.SetString(*s.HashKeyRange.EndingHashKey, 10)
+			e.writer = newShardWriter(m.streamARN, s.ShardId, s.HashKeyRange.StartingHashKey, m.bufferSize, m.batchSize, m.batchTimeoutMS, m.kc, m.done, m.invalidations)
+			go e.writer.Start()
+			m.entries = append(m.entries, e)
+		}
 	}
 }
 
