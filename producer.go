@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"errors"
 	"math/big"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -24,7 +25,6 @@ func (p *Producer) Send(ctx context.Context, partitionKey string, data []byte) e
 }
 
 func (p *Producer) SendWithRecordID(ctx context.Context, partitionKey string, recordID, data []byte) error {
-forever:
 	for {
 		rr := &resolveRequest{
 			partitionKey: partitionKey,
@@ -42,7 +42,7 @@ forever:
 		}
 		select {
 		case m.input <- wr:
-			break forever
+			return nil
 		case <-m.close:
 			continue
 		case <-ctx.Done():
@@ -57,7 +57,7 @@ func (p *Producer) Done() <-chan struct{} {
 	return p.done
 }
 
-func NewProducer(streamName string, bufferSize, batchSize int) (*Producer, error) {
+func NewProducer(streamName string, bufferSize, batchSize, batchTimeoutMS int) (*Producer, error) {
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		return nil, err
@@ -69,7 +69,7 @@ func NewProducer(streamName string, bufferSize, batchSize int) (*Producer, error
 	if err != nil {
 		return nil, err
 	}
-	sm := newShardMap(*s.StreamDescription.StreamARN, bufferSize, batchSize, kc)
+	sm := newShardMap(*s.StreamDescription.StreamARN, bufferSize, batchSize, batchTimeoutMS, kc)
 	go sm.Start()
 	return &Producer{
 		stream:   streamName,
@@ -89,15 +89,16 @@ type shardMapEntry struct {
 }
 
 type shardMap struct {
-	streamARN     *string
-	version       int
-	request       chan *resolveRequest
-	done          chan struct{}
-	invalidations chan int
-	kc            kinesisClient
-	bufferSize    int
-	batchSize     int
-	entries       []shardMapEntry
+	streamARN      *string
+	version        int
+	request        chan *resolveRequest
+	done           chan struct{}
+	invalidations  chan int
+	kc             kinesisClient
+	bufferSize     int
+	batchSize      int
+	batchTimeoutMS int
+	entries        []shardMapEntry
 }
 
 func (m *shardMap) Start() {
@@ -131,7 +132,7 @@ func (m *shardMap) build() {
 		e := shardMapEntry{}
 		e.start.SetString(*s.HashKeyRange.StartingHashKey, 10)
 		e.end.SetString(*s.HashKeyRange.EndingHashKey, 10)
-		e.writer = newShardWriter(m.streamARN, s.ShardId, s.HashKeyRange.StartingHashKey, m.bufferSize, m.batchSize, m.kc, m.done, m.invalidations)
+		e.writer = newShardWriter(m.streamARN, s.ShardId, s.HashKeyRange.StartingHashKey, m.bufferSize, m.batchSize, m.batchTimeoutMS, m.kc, m.done, m.invalidations)
 		go e.writer.Start()
 		m.entries = append(m.entries, e)
 	}
@@ -165,15 +166,16 @@ func (m *shardMap) rebuild() {
 	}
 }
 
-func newShardMap(streamARN string, bufferSize, batchSize int, kc kinesisClient) *shardMap {
+func newShardMap(streamARN string, bufferSize, batchSize, batchTimeoutMS int, kc kinesisClient) *shardMap {
 	return &shardMap{
-		streamARN:     &streamARN,
-		request:       make(chan *resolveRequest),
-		done:          make(chan struct{}),
-		invalidations: make(chan int),
-		kc:            kc,
-		bufferSize:    bufferSize,
-		batchSize:     batchSize,
+		streamARN:      &streamARN,
+		request:        make(chan *resolveRequest),
+		done:           make(chan struct{}),
+		invalidations:  make(chan int),
+		kc:             kc,
+		bufferSize:     bufferSize,
+		batchSize:      batchSize,
+		batchTimeoutMS: batchTimeoutMS,
 	}
 }
 
@@ -186,23 +188,26 @@ type writeResponse struct {
 	Err error
 }
 type shardWriter struct {
-	shardID       *string                   // Shard ID written by this writer
-	input         chan *writeRequest        // Receive messages to be written out
-	drain         chan chan []*writeRequest // Signaled by ShardMap to collect outstanding writeRequests in this shardWriter's buffer
-	close         chan struct{}             // Closed when shardWriter is no longer accepting writeRequests
-	done          chan struct{}             // Closed when it's time to abort (e.g. SIGTERM)
-	invalidations chan int                  // Used to notify shard map invalidations detected by this shardWriter
-	kinesisClient kinesisClient
-	batchSize     int
-	partitionKey  *string
-	streamARN     *string
-	version       int // Used to identify which iteration of shardMap prep created this shardWriter
+	shardID        *string                   // Shard ID written by this writer
+	input          chan *writeRequest        // Receive messages to be written out
+	drain          chan chan []*writeRequest // Signaled by ShardMap to collect outstanding writeRequests in this shardWriter's buffer
+	close          chan struct{}             // Closed when shardWriter is no longer accepting writeRequests
+	done           chan struct{}             // Closed when it's time to abort (e.g. SIGTERM)
+	invalidations  chan int                  // Used to notify shard map invalidations detected by this shardWriter
+	kinesisClient  kinesisClient
+	batchSize      int
+	batchTimeoutMS int
+	partitionKey   *string
+	streamARN      *string
+	version        int // Used to identify which iteration of shardMap prep created this shardWriter
 }
 
 func (w *shardWriter) Start() {
 	batch := make([]*writeRequest, 0)
 	send := true
 	var sn *string
+	batchTimeoutMS := time.Millisecond * time.Duration(w.batchTimeoutMS)
+	t := time.NewTimer(batchTimeoutMS)
 forever:
 	for {
 		select {
@@ -212,6 +217,13 @@ forever:
 				if send && len(batch) >= w.batchSize {
 					sn, send = w.sendBatch(batch, sn)
 				}
+			}
+		case <-t.C:
+			if send && len(batch) > 0 {
+				sn, send = w.sendBatch(batch, sn)
+			}
+			if send {
+				t.Reset(batchTimeoutMS)
 			}
 		case r := <-w.drain:
 			close(w.close)
@@ -229,7 +241,11 @@ forever:
 
 func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (*string, bool) {
 	ur := make([]*pb.UserRecord, 0)
-	for _, i := range batch[0:w.batchSize] {
+	c := w.batchSize
+	if len(batch) < c {
+		c = len(batch)
+	}
+	for _, i := range batch[0:c] {
 		ur = append(ur, i.UserRecord)
 	}
 	r := &pb.Record{
@@ -258,7 +274,7 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 		return nil, true
 	} else {
 		if o.ShardId == w.shardID {
-			batch = batch[w.batchSize:]
+			batch = batch[c:]
 			for _, i := range batch {
 				close(i.Response)
 			}
@@ -279,18 +295,19 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 	}
 }
 
-func newShardWriter(streamARN, shardID, partitionKey *string, bufferSize int, batchSize int, kinesisClient kinesisClient, done chan struct{}, invalidations chan int) *shardWriter {
+func newShardWriter(streamARN, shardID, partitionKey *string, bufferSize int, batchSize, batchTimeoutMS int, kinesisClient kinesisClient, done chan struct{}, invalidations chan int) *shardWriter {
 	return &shardWriter{
-		streamARN:     streamARN,
-		partitionKey:  partitionKey,
-		shardID:       shardID,
-		input:         make(chan *writeRequest, bufferSize),
-		close:         make(chan struct{}),
-		drain:         make(chan chan []*writeRequest),
-		invalidations: invalidations,
-		done:          done,
-		kinesisClient: kinesisClient,
-		batchSize:     batchSize,
+		streamARN:      streamARN,
+		partitionKey:   partitionKey,
+		shardID:        shardID,
+		input:          make(chan *writeRequest, bufferSize),
+		close:          make(chan struct{}),
+		drain:          make(chan chan []*writeRequest),
+		invalidations:  invalidations,
+		done:           done,
+		kinesisClient:  kinesisClient,
+		batchSize:      batchSize,
+		batchTimeoutMS: batchTimeoutMS,
 	}
 }
 
