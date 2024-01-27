@@ -21,7 +21,10 @@ type Producer struct {
 }
 
 func (p *Producer) Send(ctx context.Context, partitionKey string, data []byte) error {
-	rid := md5.Sum(data)
+	h := md5.New()
+	h.Write([]byte(partitionKey))
+	h.Write(data)
+	rid := h.Sum([]byte{})
 	return p.SendWithRecordID(ctx, partitionKey, rid[:], data)
 }
 
