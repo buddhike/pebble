@@ -16,10 +16,12 @@ import (
 type RecordProcessor func(*pb.UserRecord) error
 
 type Consumer struct {
-	p RecordProcessor
+	sm   *subscriptionManager
+	done chan struct{}
 }
 
-func (c *Consumer) Done() <-chan struct {
+func (c *Consumer) Done() <-chan struct{} {
+	return c.done
 }
 
 func NewConsumer(streamName, consumerARN string, p RecordProcessor) (*Consumer, error) {
@@ -34,7 +36,7 @@ func NewConsumer(streamName, consumerARN string, p RecordProcessor) (*Consumer, 
 	if err != nil {
 		return nil, err
 	}
-	m := &subscriptionManager{
+	sm := &subscriptionManager{
 		streamARN:   d.StreamDescription.StreamARN,
 		consumerARN: &consumerARN,
 		kc:          kc,
@@ -42,8 +44,11 @@ func NewConsumer(streamName, consumerARN string, p RecordProcessor) (*Consumer, 
 		rfs:         []recordFilter{newInvalidMappingFilter()},
 		urfs:        []userRecordFilter{newDedupFilter()},
 	}
-	go m.Start()
-	return &Consumer{}, nil
+	go sm.Start()
+	return &Consumer{
+		sm:   sm,
+		done: make(chan struct{}),
+	}, nil
 }
 
 type subscriptionManager struct {
