@@ -95,7 +95,7 @@ type shardMap struct {
 	request        chan *resolveRequest
 	done           chan struct{}
 	invalidations  chan int
-	kc             kinesisClient
+	kc             producerClient
 	bufferSize     int
 	batchSize      int
 	batchTimeoutMS int
@@ -180,7 +180,7 @@ func (m *shardMap) rebuild() {
 	}
 }
 
-func newShardMap(streamARN string, bufferSize, batchSize, batchTimeoutMS int, kc kinesisClient) *shardMap {
+func newShardMap(streamARN string, bufferSize, batchSize, batchTimeoutMS int, kc producerClient) *shardMap {
 	return &shardMap{
 		streamARN:      &streamARN,
 		request:        make(chan *resolveRequest),
@@ -208,7 +208,7 @@ type shardWriter struct {
 	close          chan struct{}             // Closed when shardWriter is no longer accepting writeRequests
 	done           chan struct{}             // Closed when it's time to abort (e.g. SIGTERM)
 	invalidations  chan int                  // Used to notify shard map invalidations detected by this shardWriter
-	kinesisClient  kinesisClient
+	kinesisClient  producerClient
 	batchSize      int
 	batchTimeoutMS int
 	partitionKey   *string
@@ -311,7 +311,7 @@ func (w *shardWriter) sendBatch(batch []*writeRequest, sequenceNumber *string) (
 	}
 }
 
-func newShardWriter(streamARN, shardID, partitionKey *string, bufferSize int, batchSize, batchTimeoutMS int, kinesisClient kinesisClient, done chan struct{}, invalidations chan int) *shardWriter {
+func newShardWriter(streamARN, shardID, partitionKey *string, bufferSize int, batchSize, batchTimeoutMS int, kinesisClient producerClient, done chan struct{}, invalidations chan int) *shardWriter {
 	return &shardWriter{
 		streamARN:      streamARN,
 		partitionKey:   partitionKey,
@@ -327,7 +327,7 @@ func newShardWriter(streamARN, shardID, partitionKey *string, bufferSize int, ba
 	}
 }
 
-type kinesisClient interface {
+type producerClient interface {
 	PutRecord(ctx context.Context, params *kinesis.PutRecordInput, optFns ...func(*kinesis.Options)) (*kinesis.PutRecordOutput, error)
 	ListShards(ctx context.Context, params *kinesis.ListShardsInput, optFns ...func(*kinesis.Options)) (*kinesis.ListShardsOutput, error)
 }
