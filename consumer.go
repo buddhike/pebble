@@ -244,6 +244,8 @@ type dedupFilter struct {
 
 func (s *dedupFilter) Apply(c *shardReaderContext, r *pb.UserRecord) bool {
 	s.l.Lock()
+	defer s.l.Unlock()
+
 	h := md5.Sum(r.RecordID)
 	k := hex.EncodeToString(h[:])
 	if _, ok := s.seen[k]; ok {
