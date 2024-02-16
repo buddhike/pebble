@@ -1,4 +1,4 @@
-package vegas
+package lib
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
-	"github.com/buddhike/vegas/pb"
+	"github.com/buddhike/vegas/client/pb"
 	"google.golang.org/protobuf/proto"
 )
 

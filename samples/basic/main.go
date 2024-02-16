@@ -3,9 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
+	"time"
 
-	"github.com/buddhike/vegas"
-	"github.com/buddhike/vegas/pb"
+	vegas "github.com/buddhike/vegas/client"
+	"github.com/buddhike/vegas/client/pb"
 )
 
 func main() {
@@ -15,11 +16,8 @@ func main() {
 		panic(err)
 	}
 	go func() {
-		p.Send(context.TODO(), "a", []byte("a"))
-		p.Send(context.TODO(), "a", []byte("a"))
-	}()
-	go func() {
-		c, err := vegas.NewConsumer(streamName, "", func(ur *pb.UserRecord) error {
+		efo := "arn:aws:kinesis:ap-southeast-2:767660010185:stream/test/consumer/python-consumer:1686199962"
+		c, err := vegas.NewConsumer(streamName, efo, func(ur *pb.UserRecord) error {
 			fmt.Println("PK: ", ur.PartitionKey, " Value: ", string(ur.Data))
 			return nil
 		})
@@ -27,6 +25,15 @@ func main() {
 			panic(err)
 		}
 		<-c.Done()
+	}()
+	time.Sleep(time.Second * 5)
+	go func() {
+		// Make this continuous
+		// Use a random generator for data
+		// Simulate normal use case and duplicates both
+		p.Send(context.TODO(), "a", []byte("a"))
+		p.Send(context.TODO(), "a", []byte("a"))
+		p.Send(context.TODO(), "b", []byte("b"))
 	}()
 	fmt.Println("Producer started")
 	<-p.Done()
