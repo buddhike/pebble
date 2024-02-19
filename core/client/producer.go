@@ -29,6 +29,8 @@ func (p *Producer) Send(ctx context.Context, partitionKey string, data []byte) e
 }
 
 func (p *Producer) SendWithRecordID(ctx context.Context, partitionKey string, recordID, data []byte) error {
+	var wr *writeRequest
+forever:
 	for {
 		rr := &resolveRequest{
 			partitionKey: partitionKey,
@@ -36,7 +38,7 @@ func (p *Producer) SendWithRecordID(ctx context.Context, partitionKey string, re
 		}
 		p.shardMap.request <- rr
 		m := <-rr.response
-		wr := &writeRequest{
+		wr = &writeRequest{
 			UserRecord: &pb.UserRecord{
 				PartitionKey: partitionKey,
 				RecordID:     recordID,
@@ -46,14 +48,21 @@ func (p *Producer) SendWithRecordID(ctx context.Context, partitionKey string, re
 		}
 		select {
 		case m.input <- wr:
-			return nil
+			break forever
 		case <-m.close:
 			continue
 		case <-ctx.Done():
 			return ctx.Err()
-		case wrr := <-wr.Response:
+		}
+	}
+	select {
+	case wrr := <-wr.Response:
+		if wrr != nil {
 			return wrr.Err
 		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
