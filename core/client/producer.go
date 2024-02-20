@@ -70,7 +70,19 @@ func (p *Producer) Done() <-chan struct{} {
 	return p.done
 }
 
-func NewProducer(streamName string, bufferSize, batchSize, batchTimeoutMS int) (*Producer, error) {
+type ProducerConfig struct {
+	BufferSize     int
+	BatchSize      int
+	BatchTimeoutMS int
+}
+
+var DefaultProducerConfig ProducerConfig = ProducerConfig{
+	BufferSize:     100,
+	BatchSize:      100,
+	BatchTimeoutMS: 100,
+}
+
+func NewProducer(streamName string, pc ProducerConfig) (*Producer, error) {
 	cfg, err := config.LoadDefaultConfig(context.TODO())
 	if err != nil {
 		return nil, err
@@ -82,7 +94,7 @@ func NewProducer(streamName string, bufferSize, batchSize, batchTimeoutMS int) (
 	if err != nil {
 		return nil, err
 	}
-	sm := newShardMap(*s.StreamDescription.StreamARN, bufferSize, batchSize, batchTimeoutMS, kc)
+	sm := newShardMap(*s.StreamDescription.StreamARN, pc.BufferSize, pc.BatchSize, pc.BatchTimeoutMS, kc)
 	go sm.Start()
 	return &Producer{
 		stream:   streamName,
