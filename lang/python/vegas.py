@@ -8,6 +8,14 @@ typedef struct {
     int batchTimeoutMS;
 }ProducerConfig;
 
+typedef struct {
+	char* partitionKey;
+	char* data;
+	int length;
+}UserRecord;
+
+typedef void Callback(UserRecord r, void* h);
+
 typedef signed char GoInt8;
 typedef unsigned char GoUint8;
 typedef short GoInt16;
@@ -27,7 +35,9 @@ extern ProducerConfig NewProducerConfig();
 extern GoInt NewProducer(char* streamName, ProducerConfig cfg);
 extern GoInt Send(GoInt producer, char* partitionKey, char* data, int n);
 extern void ReleaseProducer(GoInt i);
-         """)
+extern GoInt NewConsumer(char* streamName, char* efoARN, Callback* callback, void* handle);
+extern void WaitForConsumer(GoInt consumer);
+    """)
 
 lib = ffi.dlopen("../../core/build/libvegas.so")
 
@@ -79,3 +89,40 @@ class Producer:
 
     def close(self):
         lib.ReleaseProducer(self._instanceID)
+
+
+@ffi.callback("void(UserRecord, void*)")
+def consumer_callback(ur, handle):
+    ffi.from_handle(handle)._callback(ur)
+
+class UserRecord:
+    def __init__(self, partitionKey, data):
+        self._partitionKey = partitionKey
+        self._data = data
+    
+    @property
+    def partitionKey(self):
+        return self._partitionKey
+
+    @property
+    def data(self):
+        return self._data
+
+class Consumer:
+    def __init__(self, stream_name: str, efo_arn: str, cb):
+        handle = ffi.new_handle(self)
+        self._handle = handle
+        self._cb = cb
+        i = lib.NewConsumer(stream_name.encode(), efo_arn.encode(), consumer_callback, handle)
+        if i < 0:
+            raise Exception("Consumer initialisation failed")
+        self._id = i
+
+    def join(self):
+        lib.WaitForConsumer(self._id)
+
+    def close(self):
+        pass
+
+    def _callback(self, ur):
+        self._cb(UserRecord(ffi.string(ur.partitionKey), ffi.buffer(ur.data, ur.length)[:]))
