@@ -47,7 +47,7 @@ func NewProducer(streamName *C.char, cfg C.ProducerConfig) int {
 		BatchTimeoutMS: int(cfg.batchTimeoutMS),
 	})
 	if err != nil {
-		return 0
+		return -1
 	}
 	producers = append(producers, p)
 	return len(producers) - 1
