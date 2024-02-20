@@ -63,11 +63,12 @@ class ProducerConfig:
         self._batch_timeout_ms = v
 
 class Producer:
-    def __init__(self, streamName: str, config: ProducerConfig):
+    def __init__(self, streamName: str, config: ProducerConfig = None):
         c = lib.NewProducerConfig()
-        c.bufferSize = config.buffer_size
-        c.batchSize = config.batch_size
-        c.batchTimeoutMS = config.batch_timeout_ms
+        if not config == None:
+            c.bufferSize = config.buffer_size
+            c.batchSize = config.batch_size
+            c.batchTimeoutMS = config.batch_timeout_ms
         self._instanceID = lib.NewProducer(streamName.encode(), c)
         if self._instanceID < 0:
             raise Exception("Failed to initialise producer")
