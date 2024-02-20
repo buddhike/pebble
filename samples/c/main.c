@@ -4,7 +4,8 @@
 int main() {
     printf("hello\n");
     GoInt h = 0;
-    h = NewProducer("test", 100, 10, 100);
+    ProducerConfig c = NewProducerConfig("test");
+    h = NewProducer(c);
     Send(h, "c", "a", 1);
     return 0;
 }
