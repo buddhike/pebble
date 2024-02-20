@@ -65,7 +65,7 @@ func Send(producer int, partitionKey *C.char, data *C.char, n C.int) int {
 	return 0
 }
 
-// export ReleaseProducer
+//export ReleaseProducer
 func ReleaseProducer(i int) {
 	mut.Lock()
 	defer mut.Unlock()

@@ -26,6 +26,7 @@ typedef double _Complex GoComplex128;
 extern ProducerConfig NewProducerConfig();
 extern GoInt NewProducer(char* streamName, ProducerConfig cfg);
 extern GoInt Send(GoInt producer, char* partitionKey, char* data, int n);
+extern void ReleaseProducer(GoInt i);
          """)
 
 lib = ffi.dlopen("../../core/build/libvegas.so")
@@ -74,3 +75,6 @@ class Producer:
 
     def send(self, partitionKey: str, data: bytes):
         lib.Send(self._instanceID, partitionKey.encode(), data, len(data))
+
+    def close(self):
+        lib.ReleaseProducer(self._instanceID)
