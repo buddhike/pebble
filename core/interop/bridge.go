@@ -50,7 +50,7 @@ func NewProducerConfig() C.ProducerConfig {
 }
 
 //export NewProducer
-func NewProducer(streamName *C.char, cfg C.ProducerConfig) int {
+func NewProducer(streamName *C.char, cfg C.ProducerConfig, id *C.int) *C.char {
 	mut.Lock()
 	defer mut.Unlock()
 	p, err := vegas.NewProducer(C.GoString(streamName), vegas.ProducerConfig{
@@ -59,26 +59,27 @@ func NewProducer(streamName *C.char, cfg C.ProducerConfig) int {
 		BatchTimeoutMS: int(cfg.batchTimeoutMS),
 	})
 	if err != nil {
-		return -1
+		return C.CString(err.Error())
 	}
 	producers = append(producers, p)
-	return len(producers) - 1
+	*id = C.int(len(producers) - 1)
+	return nil
 }
 
 //export Send
-func Send(producer int, partitionKey *C.char, data *C.char, n C.int) int {
+func Send(producer int, partitionKey *C.char, data *C.char, n C.int) *C.char {
 	mut.Lock()
 	defer mut.Unlock()
 	p := producers[producer]
 	err := p.Send(context.TODO(), C.GoString(partitionKey), C.GoBytes(unsafe.Pointer(data), n))
 	if err != nil {
-		return 1
+		return C.CString(err.Error())
 	}
-	return 0
+	return nil
 }
 
 //export NewConsumer
-func NewConsumer(streamName, efoARN *C.char, callback *C.Callback, handle unsafe.Pointer) int {
+func NewConsumer(streamName, efoARN *C.char, callback *C.Callback, handle unsafe.Pointer, id *C.int) *C.char {
 	mut.Lock()
 	defer mut.Unlock()
 
@@ -92,10 +93,11 @@ func NewConsumer(streamName, efoARN *C.char, callback *C.Callback, handle unsafe
 		return nil
 	})
 	if err != nil {
-		return -1
+		return C.CString(err.Error())
 	}
 	consumers = append(consumers, c)
-	return len(consumers) - 1
+	*id = C.int(len(consumers) - 1)
+	return nil
 }
 
 //export WaitForConsumer

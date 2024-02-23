@@ -1,11 +1,18 @@
 #include <stdio.h>
+#include <string.h>
 #include "libvegas.h"
 
 int main() {
-    printf("hello\n");
-    GoInt h = 0;
+    int h = 0;
+    char* err;
+    char* msg = "hello from c";
     ProducerConfig c = NewProducerConfig();
-    h = NewProducer("test", c);
-    Send(h, "c", "a", 1);
+    err = NewProducer("test", c, &h);
+    if (err != NULL) {
+        printf("%s\n", err);
+        return 1;
+    }
+
+    Send(h, "c", msg, strlen(msg));
     return 0;
 }

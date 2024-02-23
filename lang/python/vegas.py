@@ -31,12 +31,14 @@ typedef float GoFloat32;
 typedef double GoFloat64;
 typedef float _Complex GoComplex64;
 typedef double _Complex GoComplex128;
+
 extern ProducerConfig NewProducerConfig();
-extern GoInt NewProducer(char* streamName, ProducerConfig cfg);
-extern GoInt Send(GoInt producer, char* partitionKey, char* data, int n);
-extern void ReleaseProducer(GoInt i);
-extern GoInt NewConsumer(char* streamName, char* efoARN, Callback* callback, void* handle);
+extern char* NewProducer(char* streamName, ProducerConfig cfg, int* id);
+extern char* Send(GoInt producer, char* partitionKey, char* data, int n);
+extern char* NewConsumer(char* streamName, char* efoARN, Callback* callback, void* handle, int* id);
 extern void WaitForConsumer(GoInt consumer);
+extern void ReleaseProducer(GoInt i);
+
     """)
 
 lib = ffi.dlopen("../../core/build/libvegas.so")
@@ -79,9 +81,11 @@ class Producer:
             c.bufferSize = config.buffer_size
             c.batchSize = config.batch_size
             c.batchTimeoutMS = config.batch_timeout_ms
-        self._instanceID = lib.NewProducer(streamName.encode(), c)
-        if self._instanceID < 0:
-            raise Exception("Failed to initialise producer")
+        id = ffi.new("int *")    
+        err = lib.NewProducer(streamName.encode(), c, id)
+        if err != ffi.NULL:
+            raise Exception(ffi.string(err))
+        self._instanceID = int(id[0])
         
 
     def send(self, partitionKey: str, data: bytes):
@@ -113,10 +117,11 @@ class Consumer:
         handle = ffi.new_handle(self)
         self._handle = handle
         self._cb = cb
-        i = lib.NewConsumer(stream_name.encode(), efo_arn.encode(), consumer_callback, handle)
-        if i < 0:
-            raise Exception("Consumer initialisation failed")
-        self._id = i
+        id = ffi.new("int*")
+        err = lib.NewConsumer(stream_name.encode(), efo_arn.encode(), consumer_callback, handle, id)
+        if err != ffi.NULL:
+            raise Exception(ffi.string(err))
+        self._id = int(id[0])
 
     def join(self):
         lib.WaitForConsumer(self._id)
