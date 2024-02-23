@@ -6,4 +6,5 @@ def process_record(r):
 stream = "test"
 efo = "arn:aws:kinesis:ap-southeast-2:767660010185:stream/test/consumer/python-consumer:1686199962"
 c = vegas.Consumer(stream, efo, process_record)
-c.join()
+
+input("Consumer is running. Press ctrl+c to stop\n")
