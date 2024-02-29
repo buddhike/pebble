@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: go build
+        working-directory: src
         run: |
           GOARCH=386 make build
           GOARCH=amd64 make build 
@@ -28,4 +29,4 @@ jobs:
         with:
           name: linux libs
           path: |
-            build/*.so
+            src/build/*.so
