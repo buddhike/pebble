@@ -2,6 +2,10 @@ ext = so
 
 os = $(shell uname | awk '{print tolower($0)}')
 machine = $(shell uname -m | awk '{print tolower($0)}')
+ifneq ("", "${GOARCH}")
+machine = ${GOARCH}
+endif
+
 fname = "${os}_${machine}_libvegas.so"
 
 .PHONY: clean
@@ -10,7 +14,7 @@ clean:
 
 .PHONY: build
 build: clean
-	go build -buildmode=c-shared -o "build/${fname}" ./interop
+	CGO_ENABLED=1 go build -buildmode=c-shared -o "build/${fname}" ./interop
 
 .PHONY: link
 link:
