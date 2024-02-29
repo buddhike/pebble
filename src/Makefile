@@ -1,8 +1,4 @@
-ext = so
-
-os = $(shell uname | awk '{print tolower($0)}')
-machine = $(shell uname -m | awk '{print tolower($0)}')
-fname = "${os}_${machine}_libvegas.so"
+fname = libvegas.so
 
 .PHONY: clean
 clean: 
