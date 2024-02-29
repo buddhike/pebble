@@ -1,4 +1,9 @@
-ext = so
+os = $(shell uname | tr [:upper:] [:lower:])
+machine = ${GOARCH}
+ifeq ("", "${machine}")
+machine = $(shell uname -m | tr [:upper:] [:lower:])
+endif
+fname = ${os}_${machine}_libvegas.so
 
 os = $(shell uname | awk '{print tolower($0)}')
 machine = $(shell uname -m | awk '{print tolower($0)}')
