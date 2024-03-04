@@ -21,6 +21,7 @@ jobs:
 
       - name: Setup GCC
         run: |
+          sudo apt-get update
           sudo apt-get install gcc-arm-none-eabi -y
           sudo apt-get install gcc-arm-linux-gnueabihf -y
           sudo apt-get install gcc-aarch64-linux-gnu -y
