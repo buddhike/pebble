@@ -21,9 +21,9 @@ jobs:
 
       - name: Setup GCC
         run: |
-          apt install gcc-arm-none-eabi -y
-          apt install gcc-arm-linux-gnueabihf -y
-          apt install gcc-aarch64-linux-gnu -y
+          sudo apt-get install gcc-arm-none-eabi -y
+          sudo apt-get install gcc-arm-linux-gnueabihf -y
+          sudo apt-get install gcc-aarch64-linux-gnu -y
 
       - name: Checkout repository
         uses: actions/checkout@v4
