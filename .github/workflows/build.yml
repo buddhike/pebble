@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-for-linux:
+  build-linux:
     runs-on: ubuntu-latest
     steps:
       - name: Set up Go 1.x
@@ -39,11 +39,11 @@ jobs:
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-libs
+          name: libs-linux
           path: |
             src/build/*.so
 
-  build-for-osx-m:
+  build-osx:
     runs-on: macos-latest
     steps:
       - name: Set up Go 1.x
@@ -64,18 +64,32 @@ jobs:
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: osx-libs
+          name: libs-osx
           path: |
             src/build/*.so
 
   build-python:
     runs-on: ubuntu-latest
+    needs: [build-linux, build-osx]
     steps:
       - name: Setup python
         uses: actions/setup-python@v5 
         with:
           python-version: '3.10'
 
-      - name: Package and publish
+      - name: Download libs-linux
+        uses: actions/download-artifact@v4
+        with:
+          name: libs-linux
+        
+      - name: Download libs-osx
+        uses: actions/download-artifact@v4
+        with:
+          name: libs-osx
+
+      - name: Extract libs
         run: |
-          python --version
+          unzip libs-osx.zip -d lang/python/src/libvegas/
+          unzip libs-linux.zip -d lang/python/src/libvegas/
+          ls -l lang/python/src/libvegas
+
