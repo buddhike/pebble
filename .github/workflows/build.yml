@@ -87,9 +87,8 @@ jobs:
         with:
           name: libs-osx
 
-      - name: Extract libs
+      - name: Move libs to packaging dir
         run: |
-          unzip libs-osx.zip -d lang/python/src/libvegas/
-          unzip libs-linux.zip -d lang/python/src/libvegas/
+          mv *.so lang/python/src/libvegas/
           ls -l lang/python/src/libvegas
 
