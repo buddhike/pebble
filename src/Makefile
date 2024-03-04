@@ -3,13 +3,6 @@ machine = ${GOARCH}
 ifeq ("", "${machine}")
 machine = $(shell uname -m | tr [:upper:] [:lower:])
 endif
-fname = ${os}_${machine}_libvegas.so
-
-os = $(shell uname | awk '{print tolower($0)}')
-machine = $(shell uname -m | awk '{print tolower($0)}')
-ifneq ("", "${GOARCH}")
-machine = ${GOARCH}
-endif
 
 fname = "${os}_${machine}_libvegas.so"
 
@@ -18,7 +11,7 @@ clean:
 	rm -rf build
 
 .PHONY: build
-build: clean
+build:
 	CGO_ENABLED=1 go build -buildmode=c-shared -o "build/${fname}" ./interop
 
 .PHONY: link

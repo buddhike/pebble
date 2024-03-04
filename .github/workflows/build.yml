@@ -19,16 +19,21 @@ jobs:
           go-version: ^1.22
         id: go
 
+      - name: Setup GCC
+        run: |
+          apt install gcc-arm-none-eabi -y
+          apt install gcc-arm-linux-gnueabihf -y
+          apt install gcc-aarch64-linux-gnu -y
+
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: go build
         working-directory: src
         run: |
-          # GOARCH=386 make build
+          make clean
           GOARCH=amd64 make build 
-          # GOARCH=arm make build 
-          # GOARCH=arm64 make build
+          CC=aarch64-linux-gnu-gcc GOARCH=arm64 make build
 
       - name: Archive production artifacts
         uses: actions/upload-artifact@v4
