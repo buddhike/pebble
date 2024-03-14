@@ -79,3 +79,9 @@ exclude_lines = [
   "if __name__ == .__main__.:",
   "if TYPE_CHECKING:",
 ]
+
+[tool.hatch.build.force-include]
+"libs" = "libs"
+
+[tool.hatch.build.targets.wheel.force-include]
+"libs" = "libs"

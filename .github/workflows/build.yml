@@ -71,6 +71,8 @@ jobs:
   build-python:
     runs-on: ubuntu-latest
     needs: [build-linux, build-osx]
+    permissions:
+      id-token: write
     steps:
       - name: Setup python
         uses: actions/setup-python@v5 
@@ -90,8 +92,14 @@ jobs:
         with:
           name: libs-osx
 
-      - name: Move libs to packaging dir
+      - name: Build python wheel
         run: |
-          mv *.so lang/python/src/libvegas/
-          ls -l lang/python/src/libvegas
+          mv *.so lang/python/libs/
+          pip install build
+          pip install hatchling
+          python -m build
 
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          package-dir: lang/python/dist
