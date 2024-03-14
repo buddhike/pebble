@@ -94,6 +94,7 @@ jobs:
 
       - name: Build python wheel
         run: |
+          mkdir lang/python/libs
           mv *.so lang/python/libs/
           pip install build
           pip install hatchling
