@@ -96,8 +96,8 @@ jobs:
         env: 
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
         run: |
-          mkdir lang/python/libs
-          mv *.so lang/python/libs/
+          mkdir lang/python/src/libvegas/libs
+          mv *.so lang/python/src/libvegas/libs/
           pip install poetry
           cd lang/python
           poetry config pypi-token.pypi $PYPI_TOKEN
