@@ -96,10 +96,9 @@ jobs:
         run: |
           mkdir lang/python/libs
           mv *.so lang/python/libs/
-          pip install build
-          pip install hatchling
+          pip install poetry
           cd lang/python
-          python -m build
+          poetry build
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
