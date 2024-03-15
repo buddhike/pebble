@@ -95,6 +95,8 @@ jobs:
       - name: Build python wheel
         env: 
           POETRY_PYPI_TOKEN_LIBVEGAS: ${{ secrets.PYPI_TOKEN }}
+          POETRY_HTTP_BASIC_LIBVEGAS_USERNAME: "__token__"
+          POETRY_HTTP_BASIC_LIBVEGAS_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: |
           mkdir lang/python/libs
           mv *.so lang/python/libs/
