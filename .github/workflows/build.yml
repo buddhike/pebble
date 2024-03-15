@@ -47,7 +47,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Set up Go 1.x
-        uses: actions/setup-go@v2
+        uses: actions/setup-go@v4
         with:
           go-version: ^1.22
         id: go
@@ -95,7 +95,7 @@ jobs:
       - name: Build python wheel
         env: 
           POETRY_PYPI_TOKEN_LIBVEGAS: ${{ secrets.PYPI_TOKEN }}
-          POETRY_HTTP_BASIC_LIBVEGAS_USERNAME: "__token__"
+          POETRY_HTTP_BASIC_LIBVEGAS_USERNAME: __token__
           POETRY_HTTP_BASIC_LIBVEGAS_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: |
           mkdir lang/python/libs
