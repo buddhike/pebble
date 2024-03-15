@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "libvegas"
-version = "0.1.0"
+version = "0.2.0"
 description = "Kinesis client library"
 authors = ["Buddhike de Silva <buddhiks@amazon.com>"]
 license = "MIT"
@@ -9,7 +9,7 @@ include = [
 ]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = "^3.0"
 
 [tool.poetry.dev-dependencies]
 
