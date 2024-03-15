@@ -93,14 +93,12 @@ jobs:
           name: libs-osx
 
       - name: Build python wheel
+        env: 
+          POETRY_PYPI_TOKEN_FOO: ${{ secrets.PYPI_TOKEN }}
         run: |
           mkdir lang/python/libs
           mv *.so lang/python/libs/
           pip install poetry
           cd lang/python
           poetry build
-
-      - name: Publish package distributions to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: lang/python/dist
+          poetry publish
