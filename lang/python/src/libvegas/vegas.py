@@ -50,7 +50,7 @@ if arch == "x86_64":
     arch = "amd64"
 
 lib_name = f'{os}_{arch}_libvegas.so'
-lib_path = path.join(path.dirname(__file__), lib_name)
+lib_path = path.join(path.dirname(__file__), "libs", lib_name)
 lib = ffi.dlopen(lib_path)
 
 class ProducerConfig:
