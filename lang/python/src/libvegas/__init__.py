@@ -1,1 +1,1 @@
-from binding import Producer, ProducerConfig, Consumer
+from .binding import Producer, ProducerConfig, Consumer
