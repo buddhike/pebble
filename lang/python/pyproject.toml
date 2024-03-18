@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "libvegas"
-version = "0.3.3"
+version = "0.3.4"
 description = "Kinesis client library"
 authors = ["Buddhike de Silva <buddhiks@amazon.com>"]
 license = "MIT"

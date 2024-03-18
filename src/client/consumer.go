@@ -42,7 +42,7 @@ func NewConsumer(streamName, consumerARN string, p RecordProcessor) (*Consumer, 
 		kc:          kc,
 		p:           p,
 		rfs:         []recordFilter{newInvalidMappingFilter()},
-		urfs:        []userRecordFilter{newDedupFilter()},
+		urfs:        []userRecordFilter{},
 	}
 	go sm.Start()
 	return &Consumer{
