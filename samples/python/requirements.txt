@@ -1,1 +1,3 @@
-libvegas==0.3.4
+cffi==1.16.0
+libvegas==0.3.5
+pycparser==2.21

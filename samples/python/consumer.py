@@ -1,6 +1,6 @@
 from libvegas import Consumer 
 
-def process_record(r, checkpoint):
+def process_record(r):
     print(str(r.partitionKey) + ":" + r.data.decode("utf-8"))
 
 stream = "test"
