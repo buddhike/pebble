@@ -100,11 +100,11 @@ jobs:
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
           LIBVEGAS_VERSION: ${{ github.ref }}
         run: |
-          sed 's/version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "${LIBVEGAS_VERSION}"/g' pyproject.toml > pyproject-next.toml
-          mv pyproject-next.toml pyproject.toml 
           mkdir lang/python/src/libvegas/libs
           mv *.so lang/python/src/libvegas/libs/
           pip install poetry
           cd lang/python
+          sed 's/version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "${LIBVEGAS_VERSION}"/g' pyproject.toml > pyproject-next.toml
+          mv pyproject-next.toml pyproject.toml 
           poetry config pypi-token.pypi $PYPI_TOKEN
           poetry publish --build
