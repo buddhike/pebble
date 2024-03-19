@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - main
+  release:
+    types: [created]
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -92,10 +94,14 @@ jobs:
         with:
           name: libs-osx
 
-      - name: Build python wheel
+      - name: Publish python wheel
+        if: github.event_name == 'release'
         env: 
           PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
+          LIBVEGAS_VERSION: ${{ github.ref }}
         run: |
+          sed 's/version = "[0-9]*\.[0-9]*\.[0-9]*"/version = "${LIBVEGAS_VERSION}"/g' pyproject.toml > pyproject-next.toml
+          mv pyproject-next.toml pyproject.toml 
           mkdir lang/python/src/libvegas/libs
           mv *.so lang/python/src/libvegas/libs/
           pip install poetry
