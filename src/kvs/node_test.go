@@ -59,8 +59,13 @@ func TestNode(t *testing.T) {
 		accepted = pr.Accepted
 		if !accepted {
 			nid = pr.CurrentLeader
+		} else {
+			close(n.stop)
 		}
 	}
+
+	time.Sleep(time.Second * 10)
+
 }
 
 func newTestNode(id string, logger *zap.SugaredLogger) *Node {

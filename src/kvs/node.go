@@ -136,9 +136,6 @@ func (n *Node) becomeFollower() nodeState {
 					}
 				} else {
 					timer.Reset(n.electionTimeout)
-					if n.term != msg.Term {
-						n.updateNodeState(msg.Term, "")
-					}
 					n.vote(req)
 				}
 			case *pb.ProposeRequest:
@@ -230,6 +227,7 @@ func (n *Node) appendEntries(req *Req) {
 
 func (n *Node) vote(req Req) {
 	msg := req.Msg.(*pb.VoteRequest)
+	n.updateNodeState(msg.Term, "")
 	// Get the last entry from this node's log
 	le := n.log.Last()
 	isPeerLogAsUpToDate := (le == nil) || (msg.LastLogTerm > le.Term) || (le.Term == msg.LastLogTerm && msg.LastLogIndex >= le.Index)
@@ -240,6 +238,7 @@ func (n *Node) vote(req Req) {
 	if granted {
 		n.updateNodeState(n.term, msg.CandidateID)
 	}
+	n.logger.Debugf("pebble voted id: %s candidate: %s is-peer-log-as-up-to-date: %v already-voted-this-candidate-in-same-term: %v term-is-current-or-new: %v havent-voted-yet: %v granted: %v", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
 	rmsg := pb.VoteResponse{
 		Term:    n.term,
 		Granted: granted,
@@ -281,6 +280,11 @@ func (n *Node) runElection() nodeState {
 		CandidateID: n.id,
 		Term:        n.term,
 	}
+	l := n.log.Last()
+	if l != nil {
+		vr.LastLogTerm = l.Term
+		vr.LastLogIndex = l.Index
+	}
 	peers := slices.Clone(n.peers)
 	votes := 1
 	req := Req{
@@ -290,9 +294,11 @@ func (n *Node) runElection() nodeState {
 	nextPeerInput := peers[0].Input()
 	quorumSize := len(n.peers) + 1
 	timer := time.NewTimer(n.electionTimeout)
+	n.logger.Infof("pebble is running an election id: %s term: %d", n.id, n.term)
 	for {
 		select {
 		case nextPeerInput <- req:
+			n.logger.Debugf("pebble requested vote id: %s peer: %s term: %d", n.id, peers[0].ID(), n.term)
 			timer.Reset(n.electionTimeout)
 			numOutstandingResponses++
 			peers = peers[1:]
