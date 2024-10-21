@@ -88,7 +88,7 @@ func (n *Node) Start() {
 }
 
 func (n *Node) becomeFollower() nodeState {
-	n.logger.Infof("pebble became follower id: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl became follower id: %s term: %d", n.id, n.term)
 	// If node is becoming a follower because of a new term observered
 	// from a peer, handle that request first.
 	if n.pendingRequest != nil {
@@ -120,7 +120,7 @@ func (n *Node) becomeFollower() nodeState {
 					n.currentLeader = msg.LeaderID
 					if n.term != msg.Term {
 						n.updateNodeState(msg.Term, "")
-						n.logger.Infof("pebble became follower id: %s term: %d", n.id, n.term)
+						n.logger.Infof("pebl became follower id: %s term: %d", n.id, n.term)
 					}
 					n.appendEntries(&req)
 				}
@@ -221,7 +221,6 @@ func (n *Node) appendEntries(req *Req) {
 		Msg:    rmsg,
 		Req:    req,
 	}
-	// n.logger.Debugf("pebble append entries node: %s term: %d leader: %s leader-term: %d success: %v", n.id, n.term, msg.LeaderID, msg.Term, success)
 	req.Response <- res
 }
 
@@ -238,7 +237,7 @@ func (n *Node) vote(req Req) {
 	if granted {
 		n.updateNodeState(n.term, msg.CandidateID)
 	}
-	n.logger.Debugf("pebble voted id: %s candidate: %s is-peer-log-as-up-to-date: %v already-voted-this-candidate-in-same-term: %v term-is-current-or-new: %v havent-voted-yet: %v granted: %v", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
+	n.logger.Infof("pebl voted id: %s candidate: %s is-peer-log-as-up-to-date: %v already-voted-this-candidate-in-same-term: %v term-is-current-or-new: %v havent-voted-yet: %v granted: %v", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
 	rmsg := pb.VoteResponse{
 		Term:    n.term,
 		Granted: granted,
@@ -257,7 +256,6 @@ func (n *Node) updateNodeState(term int64, votedFor string) {
 }
 
 func (n *Node) becomeCandidate() nodeState {
-	n.logger.Infof("pebble became candidate id: %s term: %d", n.id, n.term)
 	result := stateCandidate
 	for result == stateCandidate {
 		result = n.runElection()
@@ -267,6 +265,7 @@ func (n *Node) becomeCandidate() nodeState {
 
 func (n *Node) runElection() nodeState {
 	n.term++
+	n.logger.Infof("pebl election candidate: %s term: %d", n.id, n.term)
 	n.updateNodeState(n.term, "")
 	peerResponses := make(chan Res)
 	numOutstandingResponses := 0
@@ -294,11 +293,11 @@ func (n *Node) runElection() nodeState {
 	nextPeerInput := peers[0].Input()
 	quorumSize := len(n.peers) + 1
 	timer := time.NewTimer(n.electionTimeout)
-	n.logger.Infof("pebble is running an election id: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl is running an election id: %s term: %d", n.id, n.term)
 	for {
 		select {
 		case nextPeerInput <- req:
-			n.logger.Debugf("pebble requested vote id: %s peer: %s term: %d", n.id, peers[0].ID(), n.term)
+			n.logger.Debugf("pebl request vote candidate: %s term: %d, peer: %s", n.id, n.term, peers[0].ID())
 			timer.Reset(n.electionTimeout)
 			numOutstandingResponses++
 			peers = peers[1:]
@@ -380,7 +379,7 @@ func (n *Node) runElection() nodeState {
 }
 
 func (n *Node) becomeLeader() nodeState {
-	n.logger.Infof("pebble became leader id: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl became leader id: %s term: %d", n.id, n.term)
 	nextIdx := make(map[string]int64)
 	sendHeartbeat := make(map[string]bool)
 	matchIdx := make(map[string]int64)
@@ -428,7 +427,7 @@ func (n *Node) becomeLeader() nodeState {
 				Msg:      m,
 				Response: peerResponses,
 			}
-			// n.logger.Debugf("pebble heartbeat leader: %s term: %d peer: %s", n.id, n.term, nextPeer.ID())
+			// n.logger.Debugf("pebl heartbeat leader: %s term: %d peer: %s", n.id, n.term, nextPeer.ID())
 		} else if n.log.Len() >= nextIdx[nextPeer.ID()] {
 			idx := nextIdx[nextPeer.ID()]
 			nextIdx[nextPeer.ID()] = int64(idx + 1)
