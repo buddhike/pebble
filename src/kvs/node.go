@@ -88,7 +88,7 @@ func (n *Node) Start() {
 }
 
 func (n *Node) becomeFollower() nodeState {
-	n.logger.Infof("pebl became follower id: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl became follower id:%s term:%d", n.id, n.term)
 	// If node is becoming a follower because of a new term observered
 	// from a peer, handle that request first.
 	if n.pendingRequest != nil {
@@ -120,7 +120,7 @@ func (n *Node) becomeFollower() nodeState {
 					n.currentLeader = msg.LeaderID
 					if n.term != msg.Term {
 						n.updateNodeState(msg.Term, "")
-						n.logger.Infof("pebl became follower id: %s term: %d", n.id, n.term)
+						n.logger.Infof("pebl became follower id:%s term:%d", n.id, n.term)
 					}
 					n.appendEntries(&req)
 				}
@@ -237,7 +237,7 @@ func (n *Node) vote(req Req) {
 	if granted {
 		n.updateNodeState(n.term, msg.CandidateID)
 	}
-	n.logger.Infof("pebl voted id: %s candidate: %s is-peer-log-as-up-to-date: %v already-voted-this-candidate-in-same-term: %v term-is-current-or-new: %v havent-voted-yet: %v granted: %v", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
+	n.logger.Infof("pebl voted id:%s candidate:%s is-peer-log-as-up-to-date:%v already-voted-this-candidate-in-same-term:%v term-is-current-or-new:%v havent-voted-yet:%v granted:%v", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
 	rmsg := pb.VoteResponse{
 		Term:    n.term,
 		Granted: granted,
@@ -265,7 +265,7 @@ func (n *Node) becomeCandidate() nodeState {
 
 func (n *Node) runElection() nodeState {
 	n.term++
-	n.logger.Infof("pebl election candidate: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl election candidate:%s term:%d", n.id, n.term)
 	n.updateNodeState(n.term, "")
 	peerResponses := make(chan Res)
 	numOutstandingResponses := 0
@@ -293,7 +293,7 @@ func (n *Node) runElection() nodeState {
 	nextPeerInput := peers[0].Input()
 	quorumSize := len(n.peers) + 1
 	timer := time.NewTimer(n.electionTimeout)
-	n.logger.Infof("pebl is running an election id: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl is running an election id:%s term:%d", n.id, n.term)
 	for {
 		select {
 		case nextPeerInput <- req:
@@ -379,7 +379,7 @@ func (n *Node) runElection() nodeState {
 }
 
 func (n *Node) becomeLeader() nodeState {
-	n.logger.Infof("pebl became leader id: %s term: %d", n.id, n.term)
+	n.logger.Infof("pebl became leader id:%s term:%d", n.id, n.term)
 	nextIdx := make(map[string]int64)
 	sendHeartbeat := make(map[string]bool)
 	matchIdx := make(map[string]int64)
