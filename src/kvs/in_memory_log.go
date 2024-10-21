@@ -11,11 +11,11 @@ func (l *inMemoryLog) Append(entry *pb.Entry) {
 }
 
 func (l *inMemoryLog) Get(idx int64) *pb.Entry {
-	return l.entries[idx]
+	return l.entries[idx-1]
 }
 
 func (l *inMemoryLog) Truncate(after int64) {
-	l.entries = l.entries[after:0]
+	l.entries = l.entries[0:after]
 }
 
 func (l *inMemoryLog) Len() int64 {

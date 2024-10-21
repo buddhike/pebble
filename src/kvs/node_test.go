@@ -31,7 +31,7 @@ func TestNode(t *testing.T) {
 	go n3.Start()
 	go n4.Start()
 	go n5.Start()
-	time.Sleep(time.Second * 5)
+	time.Sleep(time.Second * 15)
 	nodes := map[string]*Node{
 		"n1": n1,
 		"n2": n2,
@@ -65,7 +65,6 @@ func TestNode(t *testing.T) {
 	}
 
 	time.Sleep(time.Second * 10)
-
 }
 
 func newTestNode(id string, logger *zap.SugaredLogger) *Node {

@@ -158,7 +158,7 @@ func (n *Node) runElection() nodeState {
 	// from blocking until it receives responses to every outstanding request
 	// initiated during this election.
 	defer func() {
-		go n.drain(peerResponses, numOutstandingResponses)
+		go n.drain("runElection", peerResponses, numOutstandingResponses)
 	}()
 	vr := pb.VoteRequest{
 		CandidateID: n.id,
@@ -171,14 +171,15 @@ func (n *Node) runElection() nodeState {
 	}
 	peers := slices.Clone(n.peers)
 	votes := 1
-	req := Req{
-		Msg:      &vr,
-		Response: peerResponses,
-	}
+
 	nextPeerInput := peers[0].Input()
 	quorumSize := len(n.peers) + 1
 	timer := time.NewTimer(n.electionTimeout)
 	for {
+		req := Req{
+			Msg:      &vr,
+			Response: peerResponses,
+		}
 		select {
 		case nextPeerInput <- req:
 			timer.Reset(n.electionTimeout)
@@ -211,6 +212,7 @@ func (n *Node) runElection() nodeState {
 							Term:    n.term,
 							Success: false,
 						},
+						Req: &v,
 					}
 				} else {
 					n.appendEntries(&v)
@@ -224,6 +226,7 @@ func (n *Node) runElection() nodeState {
 							Term:    n.term,
 							Granted: false,
 						},
+						Req: &v,
 					}
 				} else if n.term == msg.Term {
 					timer.Reset(n.electionTimeout)
@@ -241,6 +244,7 @@ func (n *Node) runElection() nodeState {
 						Accepted:      false,
 						CurrentLeader: "",
 					},
+					Req: &v,
 				}
 			}
 		case <-timer.C:
@@ -270,7 +274,7 @@ func (n *Node) becomeLeader() nodeState {
 	pendingProposals := make(map[int64]Req)
 
 	defer func() {
-		n.drain(peerResponses, numOutstandingResponses)
+		n.drain("leader", peerResponses, numOutstandingResponses)
 		for k := range maps.Keys(pendingProposals) {
 			req := pendingProposals[k]
 			req.Response <- Res{
@@ -290,14 +294,23 @@ func (n *Node) becomeLeader() nodeState {
 		matchIdx[p.ID()] = 0
 	}
 
-	nextPeerIdx := 0
+	// Append noop entry so that this leader can know when a majority
+	// of peers are caught-up with this term.
+	noop := &pb.Entry{
+		Index:     n.log.Len() + 1,
+		Term:      n.term,
+		Operation: "NOOP",
+	}
+	n.log.Append(noop)
+
+	next := 0
 	isIdle := false
 	for {
-		nextPeer := n.peers[nextPeerIdx]
-		nextPeerInput := nextPeer.Input()
+		peerID := n.peers[next].ID()
+		peer := n.peers[next].Input()
 		var appendEntriesReq Req
-		if sendHeartbeat[nextPeer.ID()] {
-			sendHeartbeat[nextPeer.ID()] = false
+		if sendHeartbeat[peerID] {
+			sendHeartbeat[peerID] = false
 			m := &pb.AppendEntriesRequest{
 				Term:         n.term,
 				LeaderID:     n.id,
@@ -307,13 +320,11 @@ func (n *Node) becomeLeader() nodeState {
 				Msg:      m,
 				Response: peerResponses,
 			}
-			// n.logger.Debugf("pebl heartbeat leader: %s term: %d peer: %s", n.id, n.term, nextPeer.ID())
-		} else if n.log.Len() >= nextIdx[nextPeer.ID()] {
-			idx := nextIdx[nextPeer.ID()]
-			nextIdx[nextPeer.ID()] = int64(idx + 1)
+		} else if n.log.Len() >= nextIdx[peerID] {
+			idx := nextIdx[peerID]
 			entries := make([]*pb.Entry, (n.log.Len()-idx)+1)
 			for i := range len(entries) {
-				entries[i] = n.log.Get((idx - 1) + int64(i))
+				entries[i] = n.log.Get(idx + int64(i))
 			}
 
 			m := &pb.AppendEntriesRequest{
@@ -322,15 +333,20 @@ func (n *Node) becomeLeader() nodeState {
 				LeaderCommit: n.commitIndex,
 				Entries:      entries,
 			}
+			if entries[0].Index > 1 {
+				pentry := n.log.Get(entries[0].Index - 1)
+				m.PrevLogIndex = pentry.Index
+				m.PrevLogTerm = pentry.Term
+			}
 			appendEntriesReq = Req{
 				Msg:      m,
 				Response: peerResponses,
 			}
 		} else {
-			nextPeerInput = nil
+			peer = nil
 		}
 
-		if nextPeerInput == nil {
+		if peer == nil {
 			// There's nothing to be sent to a peer.
 			// Start idle timer if it's not already running.
 			if !isIdle {
@@ -343,11 +359,11 @@ func (n *Node) becomeLeader() nodeState {
 		}
 
 		select {
-		case nextPeerInput <- appendEntriesReq:
+		case peer <- appendEntriesReq:
 			numOutstandingResponses++
-			nextPeerIdx++
-			if nextPeerIdx >= len(n.peers) {
-				nextPeerIdx = 0
+			next++
+			if next >= len(n.peers) {
+				next = 0
 			}
 		case <-idleTimer.C:
 			for k := range maps.Keys(sendHeartbeat) {
@@ -380,11 +396,14 @@ func (n *Node) becomeLeader() nodeState {
 			quorumSize := len(n.peers) + 1
 			majority := (quorumSize / 2) + 1
 			if n.commitIndex < smallestMatchIndex && matchedPeerCount >= majority {
-				e := n.log.Get(smallestMatchIndex - 1)
+				e := n.log.Get(smallestMatchIndex)
 				if e.Term == n.term {
+					if n.commitIndex != smallestMatchIndex {
+						n.logger.Infof("pebl advanced id:%s idx:%d", n.id, smallestMatchIndex)
+					}
 					n.commitIndex = smallestMatchIndex
 					for i := n.commitIndex; n.lastApplied < n.commitIndex; n.lastApplied++ {
-						entry := n.log.Get(i - 1)
+						entry := n.log.Get(i)
 						n.state.Apply(entry)
 					}
 
@@ -446,9 +465,9 @@ func (n *Node) becomeLeader() nodeState {
 		case <-n.stop:
 			return stateExit
 		default:
-			nextPeerIdx++
-			if nextPeerIdx >= len(n.peers) {
-				nextPeerIdx = 0
+			next++
+			if next >= len(n.peers) {
+				next = 0
 			}
 		}
 	}
@@ -460,6 +479,7 @@ func (n *Node) vote(req Req) {
 		panic(fmt.Errorf("vote cannot vote for older term id:%s candidate:%s current-term:%d election-term:%d", n.id, msg.CandidateID, n.term, msg.Term))
 	}
 	if msg.Term > n.term {
+		n.logger.Infof("pebl vote new term id:%s current-term:%d new-term:%d", n.id, n.term, msg.Term)
 		n.updateNodeState(msg.Term, "")
 	}
 	// Get the last entry from this node's log
@@ -493,7 +513,7 @@ func (n *Node) appendEntries(req *Req) {
 		panic(fmt.Errorf("appendEntries cannot append entries from an older term id:%s leader:%s current:%d req:%d", n.id, msg.LeaderID, n.term, msg.Term))
 	}
 	if msg.Term != n.term {
-		n.logger.Infof("pebl detected a new term via append entries id:%s current-term:%d new-term:%d", n.id, n.term, msg.Term)
+		n.logger.Infof("pebl appendEntries new term id:%s current-term:%d new-term:%d", n.id, n.term, msg.Term)
 		n.updateNodeState(msg.Term, "")
 	}
 	n.currentLeader = msg.LeaderID
@@ -570,13 +590,15 @@ func (n *Node) updateNodeState(term int64, votedFor string) {
 // state transition.
 // drain is used to read any pending requests out of those response channels
 // and ensure that peers can progress.
-func (n *Node) drain(c chan Res, numberOfOutstandingResponses int) {
+func (n *Node) drain(name string, c chan Res, numberOfOutstandingResponses int) {
+	n.logger.Debugf("drain start id:%s %s(%d)", n.id, name, numberOfOutstandingResponses)
 	for range c {
 		numberOfOutstandingResponses--
 		if numberOfOutstandingResponses == 0 {
 			break
 		}
 	}
+	n.logger.Debugf("drain end id:%s %s(%d)", n.id, name, numberOfOutstandingResponses)
 }
 
 func (n *Node) ID() string {
