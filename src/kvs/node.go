@@ -1,6 +1,7 @@
 package kvs
 
 import (
+	"fmt"
 	"maps"
 	"slices"
 	"time"
@@ -62,10 +63,6 @@ type Node struct {
 	log      Log
 	state    State
 	votedFor string
-	// Holds the request that transitioned this node to a follower.
-	// becomeFollower handles the request prior to handling new messages
-	// as a follower.
-	pendingRequest *Req
 	// Closed by user to notify that node must stop current activity and return
 	stop chan struct{}
 	// Closed by node to indicate the successful stop
@@ -89,17 +86,6 @@ func (n *Node) Start() {
 
 func (n *Node) becomeFollower() nodeState {
 	n.logger.Infof("pebl became follower id:%s term:%d", n.id, n.term)
-	// If node is becoming a follower because of a new term observered
-	// from a peer, handle that request first.
-	if n.pendingRequest != nil {
-		switch n.pendingRequest.Msg.(type) {
-		case *pb.AppendEntriesRequest:
-			n.appendEntries(n.pendingRequest)
-		case *pb.VoteRequest:
-			n.vote(*n.pendingRequest)
-		}
-		n.pendingRequest = nil
-	}
 	timer := time.NewTimer(n.electionTimeout)
 	for {
 		select {
@@ -117,11 +103,6 @@ func (n *Node) becomeFollower() nodeState {
 					}
 				} else {
 					timer.Reset(n.electionTimeout)
-					n.currentLeader = msg.LeaderID
-					if n.term != msg.Term {
-						n.updateNodeState(msg.Term, "")
-						n.logger.Infof("pebl became follower id:%s term:%d", n.id, n.term)
-					}
 					n.appendEntries(&req)
 				}
 			case *pb.VoteRequest:
@@ -160,101 +141,6 @@ func (n *Node) becomeFollower() nodeState {
 	}
 }
 
-func (n *Node) appendEntries(req *Req) {
-	msg := req.Msg.(*pb.AppendEntriesRequest)
-	var rmsg *pb.AppendEntriesResponse
-	n.currentLeader = msg.LeaderID
-	success := false
-	if len(msg.Entries) > 0 {
-		// We have entries to append
-		// We must:
-		// - ensure log matching property
-		// - truncate the log if required
-		// If we cannot satisfy these properties, respond as unsuccessful
-		if msg.PrevLogIndex == 0 {
-			// Leader is saying that entries should be appended to the begining
-			// of the log. Truncate the log to the begining and append entries.
-			n.log.Truncate(0)
-			for _, e := range msg.Entries {
-				n.log.Append(e)
-			}
-			success = true
-		} else if msg.PrevLogIndex <= n.log.Len() {
-			// Leader is saying that entries should be appended after PrevLogIndex.
-			// We also know that PrevLogIndex is valid in follower's log.
-			// To ensure log matching property, we read the entry in that location
-			// in follower and ensure the terms match.
-			p := n.log.Get(msg.PrevLogIndex)
-			if p.Term == msg.PrevLogTerm {
-				// Now that the terms are matching, truncate any entries past
-				// PrevLogIndex and append entries.
-				if msg.PrevLogIndex != n.log.Len() {
-					n.log.Truncate(msg.PrevLogIndex)
-				}
-				for _, e := range msg.Entries {
-					n.log.Append(e)
-				}
-				success = true
-			}
-		}
-	} else {
-		// This is a heartbeat request without any entries
-		success = true
-	}
-	// After any available entries are appended, ensure that
-	// commit index is updated to match leader's commit.
-	// If commit index is past the entry last applied, apply
-	// those entries to state.
-	if msg.LeaderCommit > 0 && n.log.Len() > 0 && n.log.Len() >= msg.LeaderCommit && n.log.Get(msg.LeaderCommit).Term == n.term {
-		n.commitIndex = msg.LeaderCommit
-		for i := n.commitIndex; n.lastApplied < n.commitIndex; n.lastApplied++ {
-			entry := n.log.Get(i)
-			n.state.Apply(entry)
-		}
-	}
-	rmsg = &pb.AppendEntriesResponse{
-		Term:    n.term,
-		Success: success,
-	}
-	res := Res{
-		PeerID: n.id,
-		Msg:    rmsg,
-		Req:    req,
-	}
-	req.Response <- res
-}
-
-func (n *Node) vote(req Req) {
-	msg := req.Msg.(*pb.VoteRequest)
-	n.updateNodeState(msg.Term, "")
-	// Get the last entry from this node's log
-	le := n.log.Last()
-	isPeerLogAsUpToDate := (le == nil) || (msg.LastLogTerm > le.Term) || (le.Term == msg.LastLogTerm && msg.LastLogIndex >= le.Index)
-	alreadyVotedThisCandidateInSameTerm := msg.CandidateID == n.votedFor && n.term == msg.Term
-	termIsCurrentOrNew := msg.Term >= n.term
-	haventVotedYet := n.votedFor == ""
-	granted := (haventVotedYet || alreadyVotedThisCandidateInSameTerm) && termIsCurrentOrNew && isPeerLogAsUpToDate
-	if granted {
-		n.updateNodeState(n.term, msg.CandidateID)
-	}
-	n.logger.Infof("pebl voted id:%s candidate:%s is-peer-log-as-up-to-date:%v already-voted-this-candidate-in-same-term:%v term-is-current-or-new:%v havent-voted-yet:%v granted:%v", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
-	rmsg := pb.VoteResponse{
-		Term:    n.term,
-		Granted: granted,
-	}
-	res := Res{
-		PeerID: n.id,
-		Msg:    &rmsg,
-		Req:    &req,
-	}
-	req.Response <- res
-}
-
-func (n *Node) updateNodeState(term int64, votedFor string) {
-	n.term = term
-	n.votedFor = votedFor
-}
-
 func (n *Node) becomeCandidate() nodeState {
 	result := stateCandidate
 	for result == stateCandidate {
@@ -264,9 +150,8 @@ func (n *Node) becomeCandidate() nodeState {
 }
 
 func (n *Node) runElection() nodeState {
-	n.term++
-	n.logger.Infof("pebl election candidate:%s term:%d", n.id, n.term)
-	n.updateNodeState(n.term, "")
+	n.updateNodeState(n.term+1, "")
+	n.logger.Infof("pebl became candidate:%s term:%d", n.id, n.term)
 	peerResponses := make(chan Res)
 	numOutstandingResponses := 0
 	// Use a separate go routine to drain in order to prevent this method
@@ -293,11 +178,9 @@ func (n *Node) runElection() nodeState {
 	nextPeerInput := peers[0].Input()
 	quorumSize := len(n.peers) + 1
 	timer := time.NewTimer(n.electionTimeout)
-	n.logger.Infof("pebl is running an election id:%s term:%d", n.id, n.term)
 	for {
 		select {
 		case nextPeerInput <- req:
-			n.logger.Debugf("pebl request vote candidate: %s term: %d, peer: %s", n.id, n.term, peers[0].ID())
 			timer.Reset(n.electionTimeout)
 			numOutstandingResponses++
 			peers = peers[1:]
@@ -321,13 +204,7 @@ func (n *Node) runElection() nodeState {
 		case v := <-n.request:
 			switch msg := v.Msg.(type) {
 			case *pb.AppendEntriesRequest:
-				if msg.Term >= n.term {
-					if msg.Term > n.term {
-						n.updateNodeState(msg.Term, "")
-					}
-					n.pendingRequest = &v
-					return stateFollower
-				} else {
+				if msg.Term < n.term {
 					v.Response <- Res{
 						PeerID: n.id,
 						Msg: &pb.AppendEntriesResponse{
@@ -335,6 +212,9 @@ func (n *Node) runElection() nodeState {
 							Success: false,
 						},
 					}
+				} else {
+					n.appendEntries(&v)
+					return stateFollower
 				}
 			case *pb.VoteRequest:
 				if n.term > msg.Term {
@@ -349,7 +229,7 @@ func (n *Node) runElection() nodeState {
 					timer.Reset(n.electionTimeout)
 					n.vote(req)
 				} else {
-					n.pendingRequest = &v
+					n.vote(req)
 					return stateFollower
 				}
 			case *pb.ProposeRequest:
@@ -536,8 +416,7 @@ func (n *Node) becomeLeader() nodeState {
 				pendingProposals[e.Index] = req
 			case *pb.AppendEntriesRequest:
 				if r.Term > n.term {
-					n.updateNodeState(r.Term, "")
-					n.pendingRequest = &req
+					n.appendEntries(&req)
 					return stateFollower
 				}
 				res := Res{
@@ -551,8 +430,7 @@ func (n *Node) becomeLeader() nodeState {
 				req.Response <- res
 			case *pb.VoteRequest:
 				if r.Term > n.term {
-					n.updateNodeState(r.Term, "")
-					n.pendingRequest = &req
+					n.vote(req)
 					return stateFollower
 				}
 				res := Res{
@@ -574,6 +452,114 @@ func (n *Node) becomeLeader() nodeState {
 			}
 		}
 	}
+}
+
+func (n *Node) vote(req Req) {
+	msg := req.Msg.(*pb.VoteRequest)
+	if msg.Term < n.term {
+		panic(fmt.Errorf("vote cannot vote for older term id:%s candidate:%s current-term:%d election-term:%d", n.id, msg.CandidateID, n.term, msg.Term))
+	}
+	if msg.Term > n.term {
+		n.updateNodeState(msg.Term, "")
+	}
+	// Get the last entry from this node's log
+	le := n.log.Last()
+	isPeerLogAsUpToDate := (le == nil) || (msg.LastLogTerm > le.Term) || (le.Term == msg.LastLogTerm && msg.LastLogIndex >= le.Index)
+	alreadyVotedThisCandidateInSameTerm := msg.CandidateID == n.votedFor && n.term == msg.Term
+	termIsCurrentOrNew := msg.Term >= n.term
+	haventVotedYet := n.votedFor == ""
+	granted := (haventVotedYet || alreadyVotedThisCandidateInSameTerm) && termIsCurrentOrNew && isPeerLogAsUpToDate
+	if granted {
+		n.updateNodeState(n.term, msg.CandidateID)
+	}
+	n.logger.Infof("pebl voted id:%s candidate:%s (%v,%v,%v,%v,%v)", n.id, msg.CandidateID, isPeerLogAsUpToDate, alreadyVotedThisCandidateInSameTerm, termIsCurrentOrNew, haventVotedYet, granted)
+	rmsg := pb.VoteResponse{
+		Term:    n.term,
+		Granted: granted,
+	}
+	res := Res{
+		PeerID: n.id,
+		Msg:    &rmsg,
+		Req:    &req,
+	}
+	req.Response <- res
+}
+
+func (n *Node) appendEntries(req *Req) {
+	msg := req.Msg.(*pb.AppendEntriesRequest)
+	var rmsg *pb.AppendEntriesResponse
+	n.currentLeader = msg.LeaderID
+	if msg.Term < n.term {
+		panic(fmt.Errorf("appendEntries cannot append entries from an older term id:%s leader:%s current:%d req:%d", n.id, msg.LeaderID, n.term, msg.Term))
+	}
+	if msg.Term != n.term {
+		n.logger.Infof("pebl detected a new term via append entries id:%s current-term:%d new-term:%d", n.id, n.term, msg.Term)
+		n.updateNodeState(msg.Term, "")
+	}
+	n.currentLeader = msg.LeaderID
+	success := false
+	if len(msg.Entries) > 0 {
+		// We have entries to append
+		// We must:
+		// - ensure log matching property
+		// - truncate the log if required
+		// If we cannot satisfy these properties, respond as unsuccessful
+		if msg.PrevLogIndex == 0 {
+			// Leader is saying that entries should be appended to the begining
+			// of the log. Truncate the log to the begining and append entries.
+			n.log.Truncate(0)
+			for _, e := range msg.Entries {
+				n.log.Append(e)
+			}
+			success = true
+		} else if msg.PrevLogIndex <= n.log.Len() {
+			// Leader is saying that entries should be appended after PrevLogIndex.
+			// We also know that PrevLogIndex is valid in follower's log.
+			// To ensure log matching property, we read the entry in that location
+			// in follower and ensure the terms match.
+			p := n.log.Get(msg.PrevLogIndex)
+			if p.Term == msg.PrevLogTerm {
+				// Now that the terms are matching, truncate any entries past
+				// PrevLogIndex and append entries.
+				if msg.PrevLogIndex != n.log.Len() {
+					n.log.Truncate(msg.PrevLogIndex)
+				}
+				for _, e := range msg.Entries {
+					n.log.Append(e)
+				}
+				success = true
+			}
+		}
+	} else {
+		// This is a heartbeat request without any entries
+		success = true
+	}
+	// After any available entries are appended, ensure that
+	// commit index is updated to match leader's commit.
+	// If commit index is past the entry last applied, apply
+	// those entries to state.
+	if msg.LeaderCommit > 0 && n.log.Len() > 0 && n.log.Len() >= msg.LeaderCommit && n.log.Get(msg.LeaderCommit).Term == n.term {
+		n.commitIndex = msg.LeaderCommit
+		for i := n.commitIndex; n.lastApplied < n.commitIndex; n.lastApplied++ {
+			entry := n.log.Get(i)
+			n.state.Apply(entry)
+		}
+	}
+	rmsg = &pb.AppendEntriesResponse{
+		Term:    n.term,
+		Success: success,
+	}
+	res := Res{
+		PeerID: n.id,
+		Msg:    rmsg,
+		Req:    req,
+	}
+	req.Response <- res
+}
+
+func (n *Node) updateNodeState(term int64, votedFor string) {
+	n.term = term
+	n.votedFor = votedFor
 }
 
 // drain is used to read all outstanding responses from a peer response channel.
