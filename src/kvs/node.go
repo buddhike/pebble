@@ -267,7 +267,9 @@ func (n *Node) becomeLeader() nodeState {
 	nextIdx := make(map[string]int64)
 	sendHeartbeat := make(map[string]bool)
 	lastActivity := make(map[string]time.Time)
+	readyList := make(map[string]bool)
 	matchIdx := make(map[string]int64)
+	peerByID := make(map[string]Peer)
 	idleTicker := time.NewTicker(n.heartbeatTimeout)
 	peerResponses := make(chan Res)
 	numOutstandingResponses := 0
@@ -292,6 +294,7 @@ func (n *Node) becomeLeader() nodeState {
 		nextIdx[p.ID()] = n.log.Len() + 1
 		sendHeartbeat[p.ID()] = true
 		matchIdx[p.ID()] = 0
+		peerByID[p.ID()] = p
 	}
 
 	// Append noop entry so that this leader can know when a majority
@@ -303,59 +306,47 @@ func (n *Node) becomeLeader() nodeState {
 	}
 	n.log.Append(noop)
 
-	next := 0
+	for _, p := range n.peers {
+		readyList[p.ID()] = true
+	}
 	for {
-		peerID := n.peers[next].ID()
-		peer := n.peers[next].Input()
-		var appendEntriesReq Req
-		if sendHeartbeat[peerID] {
-			m := &pb.AppendEntriesRequest{
-				Term:         n.term,
-				LeaderID:     n.id,
-				LeaderCommit: n.commitIndex,
+		for pid := range maps.Keys(readyList) {
+			if !readyList[pid] {
+				continue
 			}
-			appendEntriesReq = Req{
-				Msg:      m,
-				Response: peerResponses,
+			peer := peerByID[pid]
+			if sendHeartbeat[pid] || n.log.Len() >= nextIdx[pid] {
+				msg := &pb.AppendEntriesRequest{
+					Term:         n.term,
+					LeaderID:     n.id,
+					LeaderCommit: n.commitIndex,
+				}
+				if n.log.Len() >= nextIdx[pid] {
+					idx := nextIdx[pid]
+					entries := make([]*pb.Entry, (n.log.Len()-idx)+1)
+					for i := range len(entries) {
+						entries[i] = n.log.Get(idx + int64(i))
+					}
+					msg.Entries = entries
+					if entries[0].Index > 1 {
+						pentry := n.log.Get(entries[0].Index - 1)
+						msg.PrevLogIndex = pentry.Index
+						msg.PrevLogTerm = pentry.Term
+					}
+				}
+				req := Req{
+					Msg:      msg,
+					Response: peerResponses,
+				}
+				numOutstandingResponses++
+				go func() { peer.Input() <- req }()
+				readyList[pid] = false
+				lastActivity[pid] = time.Now()
+				sendHeartbeat[pid] = false
 			}
-		} else if n.log.Len() >= nextIdx[peerID] {
-			idx := nextIdx[peerID]
-			entries := make([]*pb.Entry, (n.log.Len()-idx)+1)
-			for i := range len(entries) {
-				entries[i] = n.log.Get(idx + int64(i))
-			}
-
-			m := &pb.AppendEntriesRequest{
-				Term:         n.term,
-				LeaderID:     n.id,
-				LeaderCommit: n.commitIndex,
-				Entries:      entries,
-			}
-			if entries[0].Index > 1 {
-				pentry := n.log.Get(entries[0].Index - 1)
-				m.PrevLogIndex = pentry.Index
-				m.PrevLogTerm = pentry.Term
-			}
-			appendEntriesReq = Req{
-				Msg:      m,
-				Response: peerResponses,
-			}
-		} else {
-			peer = nil
 		}
 
 		select {
-		case peer <- appendEntriesReq:
-			msg := appendEntriesReq.Msg.(*pb.AppendEntriesRequest)
-			if len(msg.Entries) == 0 {
-				sendHeartbeat[peerID] = false
-			}
-			lastActivity[peerID] = time.Now()
-			numOutstandingResponses++
-			next++
-			if next >= len(n.peers) {
-				next = 0
-			}
 		case <-idleTicker.C:
 			for k := range maps.Keys(sendHeartbeat) {
 				if sendHeartbeat[k] {
@@ -368,6 +359,7 @@ func (n *Node) becomeLeader() nodeState {
 			}
 		case res := <-peerResponses:
 			numOutstandingResponses--
+			readyList[res.PeerID] = true
 			msg := res.Msg.(*pb.AppendEntriesResponse)
 			if msg.Term > n.term {
 				n.updateNodeState(msg.Term, "")
@@ -469,11 +461,6 @@ func (n *Node) becomeLeader() nodeState {
 			}
 		case <-n.stop:
 			return stateExit
-		default:
-			next++
-			if next >= len(n.peers) {
-				next = 0
-			}
 		}
 	}
 }
