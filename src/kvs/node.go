@@ -266,9 +266,9 @@ func (n *Node) becomeLeader() nodeState {
 	n.logger.Infof("pebl became leader id:%s term:%d", n.id, n.term)
 	nextIdx := make(map[string]int64)
 	sendHeartbeat := make(map[string]bool)
+	lastActivity := make(map[string]time.Time)
 	matchIdx := make(map[string]int64)
-	idleTimer := time.NewTimer(n.heartbeatTimeout)
-	idleTimer.Stop()
+	idleTicker := time.NewTicker(n.heartbeatTimeout)
 	peerResponses := make(chan Res)
 	numOutstandingResponses := 0
 	pendingProposals := make(map[int64]Req)
@@ -304,13 +304,11 @@ func (n *Node) becomeLeader() nodeState {
 	n.log.Append(noop)
 
 	next := 0
-	isIdle := false
 	for {
 		peerID := n.peers[next].ID()
 		peer := n.peers[next].Input()
 		var appendEntriesReq Req
 		if sendHeartbeat[peerID] {
-			sendHeartbeat[peerID] = false
 			m := &pb.AppendEntriesRequest{
 				Term:         n.term,
 				LeaderID:     n.id,
@@ -346,34 +344,33 @@ func (n *Node) becomeLeader() nodeState {
 			peer = nil
 		}
 
-		if peer == nil {
-			// There's nothing to be sent to a peer.
-			// Start idle timer if it's not already running.
-			if !isIdle {
-				isIdle = true
-				idleTimer.Reset(n.heartbeatTimeout)
-			}
-		} else {
-			isIdle = false
-			idleTimer.Stop()
-		}
-
 		select {
 		case peer <- appendEntriesReq:
+			msg := appendEntriesReq.Msg.(*pb.AppendEntriesRequest)
+			if len(msg.Entries) == 0 {
+				sendHeartbeat[peerID] = false
+			}
+			lastActivity[peerID] = time.Now()
 			numOutstandingResponses++
 			next++
 			if next >= len(n.peers) {
 				next = 0
 			}
-		case <-idleTimer.C:
+		case <-idleTicker.C:
 			for k := range maps.Keys(sendHeartbeat) {
-				sendHeartbeat[k] = true
+				if sendHeartbeat[k] {
+					continue
+				}
+				lastActivity := lastActivity[k]
+				if time.Since(lastActivity) >= n.heartbeatTimeout {
+					sendHeartbeat[k] = true
+				}
 			}
 		case res := <-peerResponses:
 			numOutstandingResponses--
 			msg := res.Msg.(*pb.AppendEntriesResponse)
 			if msg.Term > n.term {
-				n.term = msg.Term
+				n.updateNodeState(msg.Term, "")
 				return stateFollower
 			}
 			reqMsg := res.Req.Msg.(*pb.AppendEntriesRequest)
@@ -383,30 +380,38 @@ func (n *Node) becomeLeader() nodeState {
 					nextIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index + 1
 				} else {
 					nextIdx[res.PeerID] = nextIdx[res.PeerID] - 1
+					if nextIdx[res.PeerID] < 1 {
+						panic(fmt.Errorf("pebl next index must be >= 1"))
+					}
 				}
 			}
-			smallestMatchIndex := int64(0)
-			matchedPeerCount := 0
+			// Find p such that p > commitIndex, a majority of
+			// matchIndex[i] (mp) >= p
+			p := int64(0)
+			mp := 0
 			for k := range maps.Keys(matchIdx) {
-				if matchIdx[k] > 0 && (smallestMatchIndex == 0 || matchIdx[k] <= smallestMatchIndex) {
-					smallestMatchIndex = matchIdx[k]
-					matchedPeerCount++
+				if matchIdx[k] > 0 && (p == 0 || matchIdx[k] <= p) {
+					p = matchIdx[k]
+					mp++
 				}
 			}
+			// Update commitIndex if entry at p's term is current term
 			quorumSize := len(n.peers) + 1
 			majority := (quorumSize / 2) + 1
-			if n.commitIndex < smallestMatchIndex && matchedPeerCount >= majority {
-				e := n.log.Get(smallestMatchIndex)
+			if n.commitIndex < p && mp >= majority {
+				e := n.log.Get(p)
 				if e.Term == n.term {
-					if n.commitIndex != smallestMatchIndex {
-						n.logger.Infof("pebl advanced id:%s idx:%d", n.id, smallestMatchIndex)
+					if n.commitIndex != p {
+						n.logger.Infof("pebl advanced id:%s idx:%d", n.id, p)
 					}
-					n.commitIndex = smallestMatchIndex
-					for i := n.commitIndex; n.lastApplied < n.commitIndex; n.lastApplied++ {
-						entry := n.log.Get(i)
+					n.commitIndex = p
+					for n.lastApplied != n.commitIndex {
+						n.lastApplied++
+						entry := n.log.Get(n.lastApplied)
 						n.state.Apply(entry)
 					}
 
+					// Reply to proposals
 					for k := range maps.Keys(pendingProposals) {
 						if k <= n.commitIndex {
 							r := pendingProposals[k]
@@ -554,17 +559,20 @@ func (n *Node) appendEntries(req *Req) {
 		// This is a heartbeat request without any entries
 		success = true
 	}
+
 	// After any available entries are appended, ensure that
 	// commit index is updated to match leader's commit.
 	// If commit index is past the entry last applied, apply
 	// those entries to state.
 	if msg.LeaderCommit > 0 && n.log.Len() > 0 && n.log.Len() >= msg.LeaderCommit && n.log.Get(msg.LeaderCommit).Term == n.term {
 		n.commitIndex = msg.LeaderCommit
-		for i := n.commitIndex; n.lastApplied < n.commitIndex; n.lastApplied++ {
-			entry := n.log.Get(i)
+		for n.lastApplied < n.commitIndex {
+			n.lastApplied++
+			entry := n.log.Get(n.lastApplied)
 			n.state.Apply(entry)
 		}
 	}
+
 	rmsg = &pb.AppendEntriesResponse{
 		Term:    n.term,
 		Success: success,
@@ -592,11 +600,9 @@ func (n *Node) updateNodeState(term int64, votedFor string) {
 // and ensure that peers can progress.
 func (n *Node) drain(name string, c chan Res, numberOfOutstandingResponses int) {
 	n.logger.Debugf("drain start id:%s %s(%d)", n.id, name, numberOfOutstandingResponses)
-	for range c {
+	for numberOfOutstandingResponses > 0 {
+		<-c
 		numberOfOutstandingResponses--
-		if numberOfOutstandingResponses == 0 {
-			break
-		}
 	}
 	n.logger.Debugf("drain end id:%s %s(%d)", n.id, name, numberOfOutstandingResponses)
 }
