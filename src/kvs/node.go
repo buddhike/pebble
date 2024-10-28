@@ -338,8 +338,8 @@ func (n *Node) becomeLeader() nodeState {
 					Msg:      msg,
 					Response: peerResponses,
 				}
-				numOutstandingResponses++
 				go func() { peer.Input() <- req }()
+				numOutstandingResponses++
 				readyList[pid] = false
 				lastActivity[pid] = time.Now()
 				sendHeartbeat[pid] = false
