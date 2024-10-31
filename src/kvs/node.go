@@ -2,6 +2,7 @@ package kvs
 
 import (
 	"fmt"
+	"iter"
 	"maps"
 	"slices"
 	"time"
@@ -262,40 +263,201 @@ func (n *Node) runElection() nodeState {
 	}
 }
 
-func (n *Node) becomeLeader() nodeState {
-	n.logger.Infof("pebl became leader id:%s term:%d", n.id, n.term)
-	nextIdx := make(map[string]int64)
-	sendHeartbeat := make(map[string]bool)
-	lastActivity := make(map[string]time.Time)
-	readyList := make(map[string]bool)
-	matchIdx := make(map[string]int64)
-	peerByID := make(map[string]Peer)
-	idleTicker := time.NewTicker(n.heartbeatTimeout)
-	peerResponses := make(chan Res)
-	numOutstandingResponses := 0
-	pendingProposals := make(map[int64]Req)
+type leaderState struct {
+	node                    *Node
+	nextIdx                 map[string]int64
+	matchIdx                map[string]int64
+	sendHeartbeat           map[string]bool
+	lastActivity            map[string]time.Time
+	readyList               map[string]bool
+	peerByID                map[string]Peer
+	numOutstandingResponses int
+	pendingProposals        map[int64]*Req
+}
 
-	defer func() {
-		n.drain("leader", peerResponses, numOutstandingResponses)
-		for k := range maps.Keys(pendingProposals) {
-			req := pendingProposals[k]
-			req.Response <- Res{
-				PeerID: n.id,
-				Msg: &pb.PropseResponse{
-					Accepted:      false,
-					CurrentLeader: "",
-				},
-				Req: &req,
+func (s *leaderState) cancelPendingProposals() {
+	for k := range maps.Keys(s.pendingProposals) {
+		req := s.pendingProposals[k]
+		req.Response <- Res{
+			PeerID: s.node.id,
+			Msg: &pb.PropseResponse{
+				Accepted:      false,
+				CurrentLeader: "",
+			},
+			Req: req,
+		}
+	}
+}
+
+// readyPeers returns a sequence of peers that are ready to accept a request.
+// At any given point leader can only have one outstanding request per peer.
+func (s *leaderState) readyPeers() iter.Seq[Peer] {
+	return func(yield func(Peer) bool) {
+		for k, v := range s.readyList {
+			if v {
+				if !yield(s.peerByID[k]) {
+					return
+				}
 			}
 		}
-	}()
+	}
+}
+
+// shouldSendHeartbeat returns true if p is due for a heartbeat.
+func (s *leaderState) shouldSendHeartbeat(p Peer) bool {
+	return s.sendHeartbeat[p.ID()]
+}
+
+// hasEntriesToSend returns true if there are entries to be sent to p.
+func (s *leaderState) hasEntriesToSend(p Peer) bool {
+	return s.node.log.Len() >= s.nextIdx[p.ID()]
+}
+
+func (s *leaderState) entriesFor(p Peer) []*pb.Entry {
+	if s.node.log.Len() < s.nextIdx[p.ID()] {
+		return make([]*pb.Entry, 0)
+	}
+	idx := s.nextIdx[p.ID()]
+	entries := make([]*pb.Entry, (s.node.log.Len()-idx)+1)
+	for i := range len(entries) {
+		entries[i] = s.node.log.Get(idx + int64(i))
+	}
+	return entries
+}
+
+// sendRequestTo send a request to a peer and performs the bookkeeping
+// required to track that peer as busy until a response is received.
+func (s *leaderState) sendRequestTo(p Peer, req Req) {
+	s.numOutstandingResponses++
+	s.readyList[p.ID()] = false
+	s.lastActivity[p.ID()] = time.Now()
+	s.sendHeartbeat[p.ID()] = false
+	go func() { p.Input() <- req }()
+}
+
+// ackResponseFrom performs the book keeping required to release a peer
+// from busy state so that it's available to receive the next message from
+// state machine.
+func (s *leaderState) ackResponseFrom(res Res) {
+	s.numOutstandingResponses--
+	s.readyList[res.PeerID] = true
+}
+
+// scheduleHeartbeats goes through the list of peers and schedules a new
+// heartbeat to be sent if required.
+func (s *leaderState) scheduleHeartbeats() {
+	for k := range maps.Keys(s.sendHeartbeat) {
+		if s.sendHeartbeat[k] {
+			continue
+		}
+		lastActivity := s.lastActivity[k]
+		if time.Since(lastActivity) >= s.node.heartbeatTimeout {
+			s.sendHeartbeat[k] = true
+		}
+	}
+}
+
+// ackPeerStateFor updates peer's match index and next index based on its
+// response to an append entries request.
+func (s *leaderState) ackPeerStateFor(res *Res) {
+	resMsg := res.Msg.(*pb.AppendEntriesResponse)
+	reqMsg := res.Req.Msg.(*pb.AppendEntriesRequest)
+	if len(reqMsg.Entries) > 0 {
+		if resMsg.Success {
+			s.matchIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index
+			s.nextIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index + 1
+		} else {
+			s.nextIdx[res.PeerID] = s.nextIdx[res.PeerID] - 1
+			if s.nextIdx[res.PeerID] < 1 {
+				panic(fmt.Errorf("pebl next index must be >= 1"))
+			}
+		}
+	}
+}
+
+// getLargestIndexApplicable finds out the largest index from current term that
+// is replicated on majority.
+// Returns 0 when there's nothing to apply.
+func (s *leaderState) getLargestIndexApplicable() int64 {
+	// Find p such that p > commitIndex, a majority of
+	// matchIndex[i] (mp) >= p
+	p := int64(0)
+	mp := 0
+	for k := range maps.Keys(s.matchIdx) {
+		if s.matchIdx[k] > 0 && (p == 0 || s.matchIdx[k] <= p) {
+			p = s.matchIdx[k]
+			mp++
+		}
+	}
+	// Update commitIndex if entry at p's term is current term
+	quorumSize := len(s.node.peers) + 1
+	majority := (quorumSize / 2) + 1
+	if s.node.commitIndex < p && mp >= majority {
+		e := s.node.log.Get(p)
+		if e.Term == s.node.term {
+			return p
+		}
+	}
+	return 0
+}
+
+// queueProposal indexes a given proposal request by entry index.
+func (s *leaderState) queueProposal(entry *pb.Entry, req *Req) {
+	s.pendingProposals[entry.Index] = req
+}
+
+// serviceProposals goes through proposal queue and services any
+// proposal whose entry index is equal or higher than current commit index.
+func (s *leaderState) serviceProposals() {
+	// Reply to proposals
+	for k := range maps.Keys(s.pendingProposals) {
+		if k <= s.node.commitIndex {
+			r := s.pendingProposals[k]
+			s.pendingProposals[k].Response <- Res{
+				PeerID: s.node.id,
+				Req:    r,
+				Msg: &pb.PropseResponse{
+					Accepted: true,
+				},
+			}
+		}
+	}
+}
+
+func (n *Node) newLeaderState() *leaderState {
+	s := &leaderState{
+		node:                    n,
+		nextIdx:                 make(map[string]int64),
+		matchIdx:                make(map[string]int64),
+		sendHeartbeat:           make(map[string]bool),
+		lastActivity:            make(map[string]time.Time),
+		readyList:               make(map[string]bool),
+		peerByID:                make(map[string]Peer),
+		numOutstandingResponses: 0,
+		pendingProposals:        make(map[int64]*Req),
+	}
 
 	for _, p := range n.peers {
-		nextIdx[p.ID()] = n.log.Len() + 1
-		sendHeartbeat[p.ID()] = true
-		matchIdx[p.ID()] = 0
-		peerByID[p.ID()] = p
+		s.nextIdx[p.ID()] = n.log.Len() + 1
+		s.sendHeartbeat[p.ID()] = true
+		s.matchIdx[p.ID()] = 0
+		s.peerByID[p.ID()] = p
+		s.readyList[p.ID()] = true
 	}
+
+	return s
+}
+
+func (n *Node) becomeLeader() nodeState {
+	n.logger.Infof("pebl became leader id:%s term:%d", n.id, n.term)
+	peerResponses := make(chan Res)
+	idleTicker := time.NewTicker(n.heartbeatTimeout)
+	ls := n.newLeaderState()
+
+	defer func() {
+		n.drain("leader", peerResponses, ls.numOutstandingResponses)
+		ls.cancelPendingProposals()
+	}()
 
 	// Append noop entry so that this leader can know when a majority
 	// of peers are caught-up with this term.
@@ -306,30 +468,18 @@ func (n *Node) becomeLeader() nodeState {
 	}
 	n.log.Append(noop)
 
-	for _, p := range n.peers {
-		readyList[p.ID()] = true
-	}
 	for {
-		for pid := range maps.Keys(readyList) {
-			if !readyList[pid] {
-				continue
-			}
-			peer := peerByID[pid]
-			if sendHeartbeat[pid] || n.log.Len() >= nextIdx[pid] {
+		for peer := range ls.readyPeers() {
+			if ls.shouldSendHeartbeat(peer) || ls.hasEntriesToSend(peer) {
 				msg := &pb.AppendEntriesRequest{
 					Term:         n.term,
 					LeaderID:     n.id,
 					LeaderCommit: n.commitIndex,
+					Entries:      ls.entriesFor(peer),
 				}
-				if n.log.Len() >= nextIdx[pid] {
-					idx := nextIdx[pid]
-					entries := make([]*pb.Entry, (n.log.Len()-idx)+1)
-					for i := range len(entries) {
-						entries[i] = n.log.Get(idx + int64(i))
-					}
-					msg.Entries = entries
-					if entries[0].Index > 1 {
-						pentry := n.log.Get(entries[0].Index - 1)
+				if len(msg.Entries) > 0 {
+					if msg.Entries[0].Index > 1 {
+						pentry := n.log.Get(msg.Entries[0].Index - 1)
 						msg.PrevLogIndex = pentry.Index
 						msg.PrevLogTerm = pentry.Term
 					}
@@ -338,85 +488,31 @@ func (n *Node) becomeLeader() nodeState {
 					Msg:      msg,
 					Response: peerResponses,
 				}
-				go func() { peer.Input() <- req }()
-				numOutstandingResponses++
-				readyList[pid] = false
-				lastActivity[pid] = time.Now()
-				sendHeartbeat[pid] = false
+				ls.sendRequestTo(peer, req)
 			}
 		}
 
 		select {
 		case <-idleTicker.C:
-			for k := range maps.Keys(sendHeartbeat) {
-				if sendHeartbeat[k] {
-					continue
-				}
-				lastActivity := lastActivity[k]
-				if time.Since(lastActivity) >= n.heartbeatTimeout {
-					sendHeartbeat[k] = true
-				}
-			}
+			ls.scheduleHeartbeats()
 		case res := <-peerResponses:
-			numOutstandingResponses--
-			readyList[res.PeerID] = true
+			ls.ackResponseFrom(res)
 			msg := res.Msg.(*pb.AppendEntriesResponse)
 			if msg.Term > n.term {
 				n.updateNodeState(msg.Term, "")
 				return stateFollower
 			}
-			reqMsg := res.Req.Msg.(*pb.AppendEntriesRequest)
-			if len(reqMsg.Entries) > 0 {
-				if msg.Success {
-					matchIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index
-					nextIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index + 1
-				} else {
-					nextIdx[res.PeerID] = nextIdx[res.PeerID] - 1
-					if nextIdx[res.PeerID] < 1 {
-						panic(fmt.Errorf("pebl next index must be >= 1"))
-					}
+			ls.ackPeerStateFor(&res)
+			p := ls.getLargestIndexApplicable()
+			if n.commitIndex < p {
+				n.logger.Infof("pebl advanced id:%s idx:%d", n.id, p)
+				n.commitIndex = p
+				for n.lastApplied != n.commitIndex {
+					n.lastApplied++
+					entry := n.log.Get(n.lastApplied)
+					n.state.Apply(entry)
 				}
-			}
-			// Find p such that p > commitIndex, a majority of
-			// matchIndex[i] (mp) >= p
-			p := int64(0)
-			mp := 0
-			for k := range maps.Keys(matchIdx) {
-				if matchIdx[k] > 0 && (p == 0 || matchIdx[k] <= p) {
-					p = matchIdx[k]
-					mp++
-				}
-			}
-			// Update commitIndex if entry at p's term is current term
-			quorumSize := len(n.peers) + 1
-			majority := (quorumSize / 2) + 1
-			if n.commitIndex < p && mp >= majority {
-				e := n.log.Get(p)
-				if e.Term == n.term {
-					if n.commitIndex != p {
-						n.logger.Infof("pebl advanced id:%s idx:%d", n.id, p)
-					}
-					n.commitIndex = p
-					for n.lastApplied != n.commitIndex {
-						n.lastApplied++
-						entry := n.log.Get(n.lastApplied)
-						n.state.Apply(entry)
-					}
-
-					// Reply to proposals
-					for k := range maps.Keys(pendingProposals) {
-						if k <= n.commitIndex {
-							r := pendingProposals[k]
-							pendingProposals[k].Response <- Res{
-								PeerID: n.id,
-								Req:    &r,
-								Msg: &pb.PropseResponse{
-									Accepted: true,
-								},
-							}
-						}
-					}
-				}
+				ls.serviceProposals()
 			}
 		case req := <-n.request:
 			switch r := req.Msg.(type) {
@@ -429,7 +525,7 @@ func (n *Node) becomeLeader() nodeState {
 					Value:     r.Value,
 				}
 				n.log.Append(e)
-				pendingProposals[e.Index] = req
+				ls.queueProposal(e, &req)
 			case *pb.AppendEntriesRequest:
 				if r.Term > n.term {
 					n.appendEntries(&req)

@@ -39,6 +39,7 @@ message PropseResponse {
     string currentLeader = 2;
 }
 
+
 message Entry {
     int64 index = 1;
     int64 term = 2;
