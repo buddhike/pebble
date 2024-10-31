@@ -263,6 +263,8 @@ func (n *Node) runElection() nodeState {
 	}
 }
 
+// leaderState is a data structure used to keep track of various activites
+// going on while a node is holding a leadership role.
 type leaderState struct {
 	node                    *Node
 	nextIdx                 map[string]int64
@@ -275,6 +277,8 @@ type leaderState struct {
 	pendingProposals        map[int64]*Req
 }
 
+// cancelPendingProposals sends a message to all outstanding proposal requests
+// indicating that the request has been cancelled due to leadership change.
 func (s *leaderState) cancelPendingProposals() {
 	for k := range maps.Keys(s.pendingProposals) {
 		req := s.pendingProposals[k]
@@ -313,7 +317,8 @@ func (s *leaderState) hasEntriesToSend(p Peer) bool {
 	return s.node.log.Len() >= s.nextIdx[p.ID()]
 }
 
-func (s *leaderState) entriesFor(p Peer) []*pb.Entry {
+// pendingEntriesFor returns the entries that are pending to be sent to p.
+func (s *leaderState) pendingEntriesFor(p Peer) []*pb.Entry {
 	if s.node.log.Len() < s.nextIdx[p.ID()] {
 		return make([]*pb.Entry, 0)
 	}
@@ -325,9 +330,9 @@ func (s *leaderState) entriesFor(p Peer) []*pb.Entry {
 	return entries
 }
 
-// sendRequestTo send a request to a peer and performs the bookkeeping
+// send send a request to a peer and performs the bookkeeping
 // required to track that peer as busy until a response is received.
-func (s *leaderState) sendRequestTo(p Peer, req Req) {
+func (s *leaderState) send(p Peer, req Req) {
 	s.numOutstandingResponses++
 	s.readyList[p.ID()] = false
 	s.lastActivity[p.ID()] = time.Now()
@@ -335,10 +340,10 @@ func (s *leaderState) sendRequestTo(p Peer, req Req) {
 	go func() { p.Input() <- req }()
 }
 
-// ackResponseFrom performs the book keeping required to release a peer
+// receive performs the book keeping required to release a peer
 // from busy state so that it's available to receive the next message from
 // state machine.
-func (s *leaderState) ackResponseFrom(res Res) {
+func (s *leaderState) receive(res Res) {
 	s.numOutstandingResponses--
 	s.readyList[res.PeerID] = true
 }
@@ -367,9 +372,8 @@ func (s *leaderState) ackPeerStateFor(res *Res) {
 			s.matchIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index
 			s.nextIdx[res.PeerID] = reqMsg.Entries[len(reqMsg.Entries)-1].Index + 1
 		} else {
-			s.nextIdx[res.PeerID] = s.nextIdx[res.PeerID] - 1
-			if s.nextIdx[res.PeerID] < 1 {
-				panic(fmt.Errorf("pebl next index must be >= 1"))
+			if s.nextIdx[res.PeerID] > 1 {
+				s.nextIdx[res.PeerID] = s.nextIdx[res.PeerID] - 1
 			}
 		}
 	}
@@ -475,7 +479,7 @@ func (n *Node) becomeLeader() nodeState {
 					Term:         n.term,
 					LeaderID:     n.id,
 					LeaderCommit: n.commitIndex,
-					Entries:      ls.entriesFor(peer),
+					Entries:      ls.pendingEntriesFor(peer),
 				}
 				if len(msg.Entries) > 0 {
 					if msg.Entries[0].Index > 1 {
@@ -488,7 +492,7 @@ func (n *Node) becomeLeader() nodeState {
 					Msg:      msg,
 					Response: peerResponses,
 				}
-				ls.sendRequestTo(peer, req)
+				ls.send(peer, req)
 			}
 		}
 
@@ -496,7 +500,7 @@ func (n *Node) becomeLeader() nodeState {
 		case <-idleTicker.C:
 			ls.scheduleHeartbeats()
 		case res := <-peerResponses:
-			ls.ackResponseFrom(res)
+			ls.receive(res)
 			msg := res.Msg.(*pb.AppendEntriesResponse)
 			if msg.Term > n.term {
 				n.updateNodeState(msg.Term, "")
