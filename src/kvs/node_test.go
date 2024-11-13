@@ -20,18 +20,19 @@ func TestNode(t *testing.T) {
 	n3 := newTestNode("n3", logger)
 	n4 := newTestNode("n4", logger)
 	n5 := newTestNode("n5", logger)
-	n1.SetPeers([]Peer{n2, n3, n4, n5})
-	n2.SetPeers([]Peer{n1, n3, n4, n5})
-	n3.SetPeers([]Peer{n1, n2, n4, n5})
-	n4.SetPeers([]Peer{n1, n2, n3, n5})
-	n5.SetPeers([]Peer{n1, n2, n3, n4})
+
+	n1.SetPeers([]Peer{startCP(n2), startCP(n3), startCP(n4), startCP(n5)})
+	n2.SetPeers([]Peer{startCP(n1), startCP(n3), startCP(n4), startCP(n5)})
+	n3.SetPeers([]Peer{startCP(n1), startCP(n2), startCP(n4), startCP(n5)})
+	n4.SetPeers([]Peer{startCP(n1), startCP(n2), startCP(n3), startCP(n5)})
+	n5.SetPeers([]Peer{startCP(n1), startCP(n2), startCP(n3), startCP(n4)})
 
 	go n1.Start()
 	go n2.Start()
 	go n3.Start()
 	go n4.Start()
 	go n5.Start()
-	time.Sleep(time.Second * 15)
+	time.Sleep(time.Second)
 	nodes := map[string]*Node{
 		"n1": n1,
 		"n2": n2,
@@ -40,6 +41,24 @@ func TestNode(t *testing.T) {
 		"n5": n5,
 	}
 
+	_, leader := attemptProposal(t, nodes, &pb.ProposeRequest{
+		Operation: "SET",
+		Key:       []byte("k1"),
+		Value:     []byte("v1"),
+	})
+	v, _ := attemptProposal(t, nodes, &pb.ProposeRequest{
+		Operation: "READ",
+		Key:       []byte("k1"),
+	})
+	logger.Infof("read value: %s", string(v.Value))
+	assert.Equal(t, "v1", string(v.Value))
+	close(leader.stop)
+
+	time.Sleep(time.Second * 10)
+
+}
+
+func attemptProposal(t *testing.T, nodes map[string]*Node, proposal *pb.ProposeRequest) (*pb.PropseResponse, *Node) {
 	resc := make(chan Res)
 	nid := "n1"
 	accepted := false
@@ -47,11 +66,7 @@ func TestNode(t *testing.T) {
 		t.Logf("attempting proposal: %s", nid)
 		n := nodes[nid]
 		n.Input() <- Req{
-			Msg: &pb.ProposeRequest{
-				Operation: "SET",
-				Key:       []byte("k1"),
-				Value:     []byte("v1"),
-			},
+			Msg:      proposal,
 			Response: resc,
 		}
 		r := <-resc
@@ -60,11 +75,10 @@ func TestNode(t *testing.T) {
 		if !accepted {
 			nid = pr.CurrentLeader
 		} else {
-			close(n.stop)
+			return pr, n
 		}
 	}
-
-	time.Sleep(time.Second * 10)
+	panic("should not get here")
 }
 
 func newTestNode(id string, logger *zap.SugaredLogger) *Node {

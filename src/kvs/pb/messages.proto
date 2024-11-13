@@ -37,6 +37,7 @@ message ProposeRequest {
 message PropseResponse {
     bool accepted = 1;
     string currentLeader = 2;
+    bytes value = 3;
 }
 
 

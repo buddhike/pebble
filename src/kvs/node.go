@@ -13,6 +13,7 @@ import (
 type nodeState int
 
 type Req struct {
+	id       uint64
 	Msg      proto.Message
 	Response chan Res
 }
@@ -33,6 +34,7 @@ type Log interface {
 
 type State interface {
 	Apply(*pb.Entry)
+	Read([]byte) []byte
 }
 
 type Peer interface {
@@ -56,12 +58,13 @@ type Node struct {
 	commitIndex      int64
 	lastApplied      int64
 	// Requests to this node
-	request  chan Req
-	peers    []Peer
-	term     int64
-	log      Log
-	state    State
-	votedFor string
+	input     chan Req
+	peers     []Peer
+	term      int64
+	log       Log
+	state     State
+	votedFor  string
+	requestID uint64
 	// Closed by user to notify that node must stop current activity and return
 	stop chan struct{}
 	// Closed by node to indicate the successful stop
@@ -88,7 +91,8 @@ func (n *Node) becomeFollower() nodeState {
 	timer := time.NewTimer(n.electionTimeout)
 	for {
 		select {
-		case req := <-n.request:
+		case req := <-n.input:
+			req.id = n.nextRequestID()
 			switch msg := req.Msg.(type) {
 			case *pb.AppendEntriesRequest:
 				if msg.Term < n.term {
@@ -176,6 +180,7 @@ func (n *Node) runElection() nodeState {
 	timer := time.NewTimer(n.electionTimeout)
 	for {
 		req := Req{
+			id:       n.nextRequestID(),
 			Msg:      &vr,
 			Response: peerResponses,
 		}
@@ -201,7 +206,8 @@ func (n *Node) runElection() nodeState {
 					return stateLeader
 				}
 			}
-		case v := <-n.request:
+		case v := <-n.input:
+			v.id = n.nextRequestID()
 			switch msg := v.Msg.(type) {
 			case *pb.AppendEntriesRequest:
 				if msg.Term < n.term {
@@ -282,6 +288,7 @@ func (n *Node) becomeLeader() nodeState {
 	n.log.Append(noop)
 
 	for {
+		canServiceReads := n.commitIndex >= noop.Index
 		for peer := range leader.readyPeers() {
 			if leader.shouldSendHeartbeat(peer) || leader.hasEntriesToSend(peer) {
 				msg := &pb.AppendEntriesRequest{
@@ -298,10 +305,23 @@ func (n *Node) becomeLeader() nodeState {
 					}
 				}
 				req := Req{
+					id:       n.nextRequestID(),
 					Msg:      msg,
 					Response: peerResponses,
 				}
 				leader.send(peer, req)
+			} else if canServiceReads && leader.canSendReadbeat(peer) {
+				msg := &pb.AppendEntriesRequest{
+					Term:         n.term,
+					LeaderID:     n.id,
+					LeaderCommit: n.commitIndex,
+				}
+				req := Req{
+					id:       n.nextRequestID(),
+					Msg:      msg,
+					Response: peerResponses,
+				}
+				leader.sendReadbeat(peer, &req)
 			}
 		}
 
@@ -315,7 +335,7 @@ func (n *Node) becomeLeader() nodeState {
 				n.updateNodeState(msg.Term, "")
 				return stateFollower
 			}
-			leader.ackPeerStateFor(&res)
+			leader.updatePeerState(&res)
 			p := leader.getLargestIndexApplicable()
 			if n.commitIndex < p {
 				n.logger.Infof("pebl advanced id:%s idx:%d", n.id, p)
@@ -327,18 +347,24 @@ func (n *Node) becomeLeader() nodeState {
 				}
 				leader.serviceProposals()
 			}
-		case req := <-n.request:
+			leader.serviceReadProposals(&res)
+		case req := <-n.input:
+			req.id = n.nextRequestID()
 			switch r := req.Msg.(type) {
 			case *pb.ProposeRequest:
-				e := &pb.Entry{
-					Index:     n.log.Len() + 1,
-					Term:      n.term,
-					Operation: r.Operation,
-					Key:       r.Key,
-					Value:     r.Value,
+				if r.Operation == "READ" {
+					leader.queueReadProposal(&req)
+				} else {
+					e := &pb.Entry{
+						Index:     n.log.Len() + 1,
+						Term:      n.term,
+						Operation: r.Operation,
+						Key:       r.Key,
+						Value:     r.Value,
+					}
+					n.log.Append(e)
+					leader.queueProposal(e, &req)
 				}
-				n.log.Append(e)
-				leader.queueProposal(e, &req)
 			case *pb.AppendEntriesRequest:
 				if r.Term > n.term {
 					n.appendEntries(&req)
@@ -503,12 +529,17 @@ func (n *Node) drain(name string, c chan Res, numberOfOutstandingResponses int) 
 	n.logger.Debugf("drain end id:%s %s(%d)", n.id, name, numberOfOutstandingResponses)
 }
 
+func (n *Node) nextRequestID() uint64 {
+	n.requestID++
+	return n.requestID
+}
+
 func (n *Node) ID() string {
 	return n.id
 }
 
 func (n *Node) Input() chan<- Req {
-	return n.request
+	return n.input
 }
 
 func (n *Node) Done() <-chan struct{} {
@@ -528,7 +559,7 @@ func NewNode(id string, heartbeatTimeout, electionTimeout time.Duration, log Log
 		state:            state,
 		stop:             stop,
 		done:             make(chan struct{}),
-		request:          make(chan Req),
+		input:            make(chan Req),
 		logger:           logger,
 	}
 }

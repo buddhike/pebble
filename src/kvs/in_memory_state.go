@@ -9,3 +9,7 @@ type inMemoryMap struct {
 func (m *inMemoryMap) Apply(entry *pb.Entry) {
 	m.i[string(entry.Key)] = string(entry.Value)
 }
+
+func (m *inMemoryMap) Read(key []byte) []byte {
+	return []byte(m.i[string(key)])
+}
