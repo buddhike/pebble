@@ -154,7 +154,7 @@ func (l *leader) getLargestIndexApplicable() int64 {
 			mp++
 		}
 	}
-	// Update commitIndex if entry at p's term is current term
+	// Ensure that if entry at p's term is current term
 	quorumSize := len(l.node.peers) + 1
 	majority := (quorumSize / 2) + 1
 	if l.node.commitIndex < p && mp >= majority {
@@ -234,7 +234,7 @@ func (l *leader) serviceReadProposals(res *Res) {
 	if msg.Success {
 		l.readbeatSuccessCount[p.id] = l.readbeatSuccessCount[p.id] + 1
 	}
-	majority := len(l.node.peers)/2 + 1
+	majority := len(l.node.peers) / 2
 	readbeatSuccessFromMajority := l.readbeatSuccessCount[p.id] >= majority
 	readbeatAckedByAllPeers := l.readbeatCount[p.id] == len(l.node.peers)
 	if readbeatSuccessFromMajority {
