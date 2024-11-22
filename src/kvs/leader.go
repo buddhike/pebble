@@ -8,6 +8,18 @@ import (
 	"github.com/buddhike/pebble/kvs/pb"
 )
 
+// Tracks the lifecycle of a read proposal
+type readProposal struct {
+	// req is the read proposal request
+	req *Req
+	// successfulReadbeats keeps track of how many readbeats are successfully acked by peers
+	// for a given read proposal
+	successfulReadbeats int
+	// completedReadbeats keeps track of how many readbeats are sent to peers
+	// for a given read proposal
+	completedReadbeats int
+}
+
 // leader is a data structure used to keep track of various activites
 // going on while a node is holding a leadership role.
 type leader struct {
@@ -20,28 +32,22 @@ type leader struct {
 	peerByID                map[string]Peer
 	numOutstandingResponses int
 	// Maps waiting write proposals to their entry index
-	waitingProposals map[int64]*Req
+	pendingWriteProposals map[int64]*Req
 	// Set of pending read proposals for O(1) lookup
-	pendingReadProposalsSet map[uint64]*Req
-	// Map to keep track of how many readbeats are successfully acked by peers
-	// for a given read proposal
-	readbeatSuccessCount map[uint64]int
-	// Map to keep track of how many readbeats are sent to peers
-	// for a given read proposal
-	readbeatCount map[uint64]int
+	pendingReadProposalsSet map[uint64]*readProposal
 	// Maps a readbeat request to the corresponding read proposal
-	readbeatToReadProposal map[uint64]uint64
+	readbeatToReadProposal map[uint64]*readProposal
 	// Maps list of read proposals to be sent as readbeats to peer
-	peerReadProposals map[Peer][]uint64
+	peerReadProposals map[Peer][]*readProposal
 }
 
 // cancelPendingProposals sends a message to all outstanding proposal requests
 // indicating that the request has been cancelled due to leadership change.
 func (l *leader) cancelPendingProposals() {
-	l.node.logger.Infof("Start cancelPendingProposals %v", l.waitingProposals)
-	for k := range maps.Keys(l.waitingProposals) {
-		req := l.waitingProposals[k]
-		delete(l.waitingProposals, k)
+	l.node.logger.Infof("Start cancelPendingProposals %v", l.pendingWriteProposals)
+	for k := range maps.Keys(l.pendingWriteProposals) {
+		req := l.pendingWriteProposals[k]
+		delete(l.pendingWriteProposals, k)
 		req.Response <- Res{
 			PeerID: l.node.id,
 			Msg: &pb.PropseResponse{
@@ -155,8 +161,7 @@ func (l *leader) getLargestIndexApplicable() int64 {
 		}
 	}
 	// Ensure that if entry at p's term is current term
-	quorumSize := len(l.node.peers) + 1
-	majority := (quorumSize / 2) + 1
+	majority := len(l.node.peers) / 2
 	if l.node.commitIndex < p && mp >= majority {
 		e := l.node.log.Get(p)
 		if e.Term == l.node.term {
@@ -168,16 +173,19 @@ func (l *leader) getLargestIndexApplicable() int64 {
 
 // queueProposal indexes a given proposal request by entry index.
 func (l *leader) queueProposal(entry *pb.Entry, req *Req) {
-	l.waitingProposals[entry.Index] = req
+	l.pendingWriteProposals[entry.Index] = req
 }
 
 // queueReadProposal enqueues a new read request to read proposals queue
 // Read proposals queue is used to implement linearisable reads.
 func (l *leader) queueReadProposal(req *Req) {
-	l.pendingReadProposalsSet[req.id] = req
-	for _, p := range l.node.peers {
-		prq := l.peerReadProposals[p]
-		l.peerReadProposals[p] = append(prq, req.id)
+	p := &readProposal{
+		req: req,
+	}
+	l.pendingReadProposalsSet[req.id] = p
+	for _, peer := range l.node.peers {
+		prq := l.peerReadProposals[peer]
+		l.peerReadProposals[peer] = append(prq, p)
 	}
 }
 
@@ -190,6 +198,7 @@ func (l *leader) canSendReadbeat(peer Peer) bool {
 // sendReadbeat sends a readbeat request to a given peer.
 func (l *leader) sendReadbeat(peer Peer, rb *Req) {
 	peerReadProposalsQ := l.peerReadProposals[peer]
+	// TODO: Consider aggregating multiple proposals to a heartbeat
 	l.readbeatToReadProposal[rb.id] = peerReadProposalsQ[0]
 	l.peerReadProposals[peer] = peerReadProposalsQ[1:]
 	l.send(peer, *rb)
@@ -199,10 +208,10 @@ func (l *leader) sendReadbeat(peer Peer, rb *Req) {
 // proposal whose entry index is equal or higher than current commit index.
 func (l *leader) serviceProposals() {
 	// Reply to proposals
-	for k := range maps.Keys(l.waitingProposals) {
+	for k := range maps.Keys(l.pendingWriteProposals) {
 		if k <= l.node.commitIndex {
-			r := l.waitingProposals[k]
-			delete(l.waitingProposals, k)
+			r := l.pendingWriteProposals[k]
+			delete(l.pendingWriteProposals, k)
 			r.Response <- Res{
 				PeerID: l.node.id,
 				Req:    r,
@@ -216,31 +225,30 @@ func (l *leader) serviceProposals() {
 
 func (l *leader) serviceReadProposals(res *Res) {
 	req := res.Req
-	pid, ok := l.readbeatToReadProposal[req.id]
+	rp, ok := l.readbeatToReadProposal[req.id]
 	if !ok {
 		// This is not a response to a readbeat
 		return
 	}
 	delete(l.readbeatToReadProposal, req.id)
-	p := l.pendingReadProposalsSet[pid]
-	if p == nil {
+	if _, ok := l.pendingReadProposalsSet[rp.req.id]; !ok {
 		// We have received successful acks from majority and removed
 		// it from readbeatToReadProposal map. Nothing to do here.
 		return
 	}
 
-	l.readbeatCount[p.id] = l.readbeatCount[p.id] + 1
+	rp.completedReadbeats++
 	msg := res.Msg.(*pb.AppendEntriesResponse)
 	if msg.Success {
-		l.readbeatSuccessCount[p.id] = l.readbeatSuccessCount[p.id] + 1
+		rp.successfulReadbeats++
 	}
 	majority := len(l.node.peers) / 2
-	readbeatSuccessFromMajority := l.readbeatSuccessCount[p.id] >= majority
-	readbeatAckedByAllPeers := l.readbeatCount[p.id] == len(l.node.peers)
+	readbeatSuccessFromMajority := rp.successfulReadbeats >= majority
+	readbeatAckedByAllPeers := rp.completedReadbeats == len(l.node.peers)
 	if readbeatSuccessFromMajority {
-		proposal := p.Msg.(*pb.ProposeRequest)
+		proposal := rp.req.Msg.(*pb.ProposeRequest)
 		result := l.node.state.Read(proposal.Key)
-		p.Response <- Res{
+		rp.req.Response <- Res{
 			PeerID: l.node.id,
 			Req:    req,
 			Msg: &pb.PropseResponse{
@@ -251,7 +259,7 @@ func (l *leader) serviceReadProposals(res *Res) {
 		}
 	} else if readbeatAckedByAllPeers {
 		l.node.logger.Infof("rejecting a read proposal")
-		p.Response <- Res{
+		rp.req.Response <- Res{
 			PeerID: l.node.id,
 			Req:    req,
 			Msg: &pb.PropseResponse{
@@ -262,9 +270,7 @@ func (l *leader) serviceReadProposals(res *Res) {
 	}
 	// Clean up
 	if readbeatAckedByAllPeers || readbeatSuccessFromMajority {
-		delete(l.pendingReadProposalsSet, p.id)
-		delete(l.readbeatSuccessCount, p.id)
-		delete(l.readbeatCount, p.id)
+		delete(l.pendingReadProposalsSet, rp.req.id)
 	}
 }
 
@@ -278,12 +284,10 @@ func newLeader(n *Node) *leader {
 		readyList:               make(map[string]bool),
 		peerByID:                make(map[string]Peer),
 		numOutstandingResponses: 0,
-		waitingProposals:        make(map[int64]*Req),
-		pendingReadProposalsSet: make(map[uint64]*Req),
-		readbeatCount:           make(map[uint64]int),
-		readbeatSuccessCount:    make(map[uint64]int),
-		readbeatToReadProposal:  make(map[uint64]uint64),
-		peerReadProposals:       make(map[Peer][]uint64),
+		pendingWriteProposals:   make(map[int64]*Req),
+		pendingReadProposalsSet: make(map[uint64]*readProposal),
+		readbeatToReadProposal:  make(map[uint64]*readProposal),
+		peerReadProposals:       make(map[Peer][]*readProposal),
 	}
 
 	for _, p := range n.peers {

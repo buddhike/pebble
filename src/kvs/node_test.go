@@ -1,7 +1,9 @@
 package kvs
 
 import (
+	"maps"
 	"math/rand"
+	"slices"
 	"testing"
 	"time"
 
@@ -50,17 +52,22 @@ func TestNode(t *testing.T) {
 		Operation: "READ",
 		Key:       []byte("k1"),
 	})
-	logger.Infof("read value: %s", string(v.Value))
 	assert.Equal(t, "v1", string(v.Value))
 	close(leader.stop)
+	delete(nodes, leader.id)
 
 	time.Sleep(time.Second * 10)
 
+	v, _ = attemptProposal(t, nodes, &pb.ProposeRequest{
+		Operation: "READ",
+		Key:       []byte("k1"),
+	})
+	assert.Equal(t, "v1", string(v.Value))
 }
 
 func attemptProposal(t *testing.T, nodes map[string]*Node, proposal *pb.ProposeRequest) (*pb.PropseResponse, *Node) {
 	resc := make(chan Res)
-	nid := "n1"
+	nid := slices.Collect(maps.Keys(nodes))[0]
 	accepted := false
 	for !accepted {
 		t.Logf("attempting proposal: %s", nid)
