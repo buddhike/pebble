@@ -9,13 +9,15 @@ import (
 )
 
 // Tracks the lifecycle of a read proposal
+// Read proposal can be satisfied either when successfulReadbeats >=
+// half the number of peers or when completedReadbeats == number of peers.
 type readProposal struct {
 	// req is the read proposal request
 	req *Req
 	// successfulReadbeats keeps track of how many readbeats are successfully acked by peers
 	// for a given read proposal
 	successfulReadbeats int
-	// completedReadbeats keeps track of how many readbeats are sent to peers
+	// completedReadbeats keeps track of how many readbeats are acked by the peers
 	// for a given read proposal
 	completedReadbeats int
 }
