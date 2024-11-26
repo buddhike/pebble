@@ -44,12 +44,12 @@ func TestNode(t *testing.T) {
 	}
 
 	_, leader := attemptProposal(t, nodes, &pb.ProposeRequest{
-		Operation: "SET",
+		Operation: pb.Op_Set,
 		Key:       []byte("k1"),
 		Value:     []byte("v1"),
 	})
 	v, _ := attemptProposal(t, nodes, &pb.ProposeRequest{
-		Operation: "READ",
+		Operation: pb.Op_Get,
 		Key:       []byte("k1"),
 	})
 	assert.Equal(t, "v1", string(v.Value))
@@ -59,7 +59,7 @@ func TestNode(t *testing.T) {
 	time.Sleep(time.Second * 10)
 
 	v, _ = attemptProposal(t, nodes, &pb.ProposeRequest{
-		Operation: "READ",
+		Operation: pb.Op_Get,
 		Key:       []byte("k1"),
 	})
 	assert.Equal(t, "v1", string(v.Value))

@@ -281,9 +281,11 @@ func (n *Node) becomeLeader() nodeState {
 	// Append noop entry so that this leader can know when a majority
 	// of peers are caught-up with this term.
 	noop := &pb.Entry{
+		// Timestamp is added for diagnostics
+		Timestamp: time.Now().UnixMilli(),
 		Index:     n.log.Len() + 1,
 		Term:      n.term,
-		Operation: "NOOP",
+		Operation: pb.Op_Noop,
 	}
 	n.log.Append(noop)
 
@@ -352,13 +354,16 @@ func (n *Node) becomeLeader() nodeState {
 			req.id = n.nextRequestID()
 			switch r := req.Msg.(type) {
 			case *pb.ProposeRequest:
-				if r.Operation == "READ" {
+				if r.Operation == pb.Op_Get {
 					leader.queueReadProposal(&req)
 				} else {
 					e := &pb.Entry{
 						Index:     n.log.Len() + 1,
 						Term:      n.term,
 						Operation: r.Operation,
+						Timestamp: time.Now().UnixMilli(),
+						SessionID: r.SessionID,
+						Sequence:  r.Sequence,
 						Key:       r.Key,
 						Value:     r.Value,
 					}

@@ -17,3 +17,8 @@ build:
 .PHONY: link
 link:
 	ln -s "$(pwd)/build/build/${fname}" "../lang/python/src/${fname}"
+
+
+.PHONY: protoc
+protoc:
+	protoc --proto_path=./kvs/pb --go_out=./kvs/ messages.proto

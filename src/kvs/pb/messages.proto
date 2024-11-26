@@ -2,6 +2,20 @@ syntax = "proto3";
 package pebble;
 option go_package = "./pb";
 
+enum Op {
+    Noop = 0;
+    Set = 1;
+    Get = 2;
+    Del = 3;
+    KeepAlive = 4;
+    CreateSession = 5;
+}
+
+enum Error {
+    NoError = 0;
+    SessionNotFound = 1;
+}
+
 message VoteRequest {
     int64 term = 1;
     string candidateID = 2;
@@ -29,23 +43,29 @@ message AppendEntriesResponse {
 }
 
 message ProposeRequest {
-    string operation = 1;
-    bytes key = 2;
-    bytes value = 3;
+    bytes sessionID = 1;
+    int64 sequence = 2;
+    Op operation = 3;
+    bytes key = 4;
+    bytes value = 5;
 }
 
 message PropseResponse {
     bool accepted = 1;
     string currentLeader = 2;
     bytes value = 3;
+    Error error = 4;
 }
 
 
 message Entry {
     int64 index = 1;
     int64 term = 2;
-    string operation = 3;
-    bytes key = 4;
-    bytes value = 5;
+    Op operation = 3;
+    int64 timestamp = 4;
+    bytes sessionID = 5;
+    int64 sequence = 6;
+    bytes key = 7;
+    bytes value = 8;
 }
 
