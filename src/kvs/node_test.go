@@ -1,6 +1,7 @@
 package kvs
 
 import (
+	"fmt"
 	"maps"
 	"math/rand"
 	"slices"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/buddhike/pebble/kvs/pb"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/zap"
 )
@@ -65,25 +67,47 @@ func TestNode(t *testing.T) {
 	assert.Equal(t, "v1", string(v.Value))
 }
 
-func attemptProposal(t *testing.T, nodes map[string]*Node, proposal *pb.ProposeRequest) (*pb.PropseResponse, *Node) {
+func attemptProposal(t *testing.T, nodes map[string]*Node, proposal *pb.ProposeRequest) (*pb.ProposeResponse, *Node) {
 	resc := make(chan Res)
 	nid := slices.Collect(maps.Keys(nodes))[0]
 	accepted := false
 	for !accepted {
 		t.Logf("attempting proposal: %s", nid)
 		n := nodes[nid]
+
+		uid := uuid.Must(uuid.NewRandom())
+		n.Input() <- Req{
+			Msg: &pb.ProposeRequest{
+				Operation: pb.Op_CreateSession,
+				SessionID: uid[:],
+			},
+			Response: resc,
+		}
+		r := <-resc
+		pr := r.Msg.(*pb.ProposeResponse)
+		accepted = pr.Accepted
+		if !accepted {
+			if pr.Error == pb.Error_ClientError {
+				panic(string(pr.Value))
+			}
+			nid = pr.CurrentLeader
+			continue
+		}
+		sid := pr.Value
+
+		proposal.SessionID = sid
+		proposal.Sequence = 1
 		n.Input() <- Req{
 			Msg:      proposal,
 			Response: resc,
 		}
-		r := <-resc
-		pr := r.Msg.(*pb.PropseResponse)
+		r = <-resc
+		pr = r.Msg.(*pb.ProposeResponse)
 		accepted = pr.Accepted
 		if !accepted {
-			nid = pr.CurrentLeader
-		} else {
-			return pr, n
+			panic(fmt.Sprintf("not accepted %d %s", pr.Error, string(pr.Value)))
 		}
+		return pr, n
 	}
 	panic("should not get here")
 }
@@ -95,9 +119,7 @@ func newTestNode(id string, logger *zap.SugaredLogger) *Node {
 	log := &inMemoryLog{
 		entries: make([]*pb.Entry, 0),
 	}
-	state := &inMemoryMap{
-		i: make(map[string]string),
-	}
+	state := newInMemoryMap()
 	stop := make(chan struct{})
 	return NewNode(id, time.Millisecond*50, time.Millisecond*time.Duration(electionTimeout), log, state, stop, logger)
 }

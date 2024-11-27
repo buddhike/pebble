@@ -52,7 +52,7 @@ func (l *leader) cancelPendingProposals() {
 		delete(l.pendingWriteProposals, k)
 		req.Response <- Res{
 			PeerID: l.node.id,
-			Msg: &pb.PropseResponse{
+			Msg: &pb.ProposeResponse{
 				Accepted:      false,
 				CurrentLeader: "",
 			},
@@ -206,23 +206,12 @@ func (l *leader) sendReadbeat(peer Peer, rb *Req) {
 	l.send(peer, *rb)
 }
 
-// serviceProposals goes through proposal queue and services any
-// proposal whose entry index is equal or higher than current commit index.
-func (l *leader) serviceProposals() {
-	// Reply to proposals
-	for k := range maps.Keys(l.pendingWriteProposals) {
-		if k <= l.node.commitIndex {
-			r := l.pendingWriteProposals[k]
-			delete(l.pendingWriteProposals, k)
-			r.Response <- Res{
-				PeerID: l.node.id,
-				Req:    r,
-				Msg: &pb.PropseResponse{
-					Accepted: true,
-				},
-			}
-		}
+func (l *leader) getPendingWriteRequest(index int64) *Req {
+	r := l.pendingWriteProposals[index]
+	if r != nil {
+		delete(l.pendingWriteProposals, index)
 	}
+	return r
 }
 
 func (l *leader) serviceReadProposals(res *Res) {
@@ -253,7 +242,7 @@ func (l *leader) serviceReadProposals(res *Res) {
 		rp.req.Response <- Res{
 			PeerID: l.node.id,
 			Req:    req,
-			Msg: &pb.PropseResponse{
+			Msg: &pb.ProposeResponse{
 				Accepted:      true,
 				CurrentLeader: l.node.id,
 				Value:         result,
@@ -264,7 +253,7 @@ func (l *leader) serviceReadProposals(res *Res) {
 		rp.req.Response <- Res{
 			PeerID: l.node.id,
 			Req:    req,
-			Msg: &pb.PropseResponse{
+			Msg: &pb.ProposeResponse{
 				Accepted:      false,
 				CurrentLeader: l.node.id,
 			},

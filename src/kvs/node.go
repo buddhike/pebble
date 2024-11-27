@@ -33,7 +33,7 @@ type Log interface {
 }
 
 type State interface {
-	Apply(*pb.Entry)
+	Apply(*pb.Entry) *pb.ProposeResponse
 	Read([]byte) []byte
 }
 
@@ -129,7 +129,7 @@ func (n *Node) becomeFollower() nodeState {
 				// that request with the leader.
 				req.Response <- Res{
 					PeerID: n.id,
-					Msg: &pb.PropseResponse{
+					Msg: &pb.ProposeResponse{
 						Accepted:      false,
 						CurrentLeader: n.currentLeader,
 					},
@@ -245,7 +245,7 @@ func (n *Node) runElection() nodeState {
 				// from clients are rejected.
 				v.Response <- Res{
 					PeerID: n.id,
-					Msg: &pb.PropseResponse{
+					Msg: &pb.ProposeResponse{
 						Accepted:      false,
 						CurrentLeader: "",
 					},
@@ -345,9 +345,16 @@ func (n *Node) becomeLeader() nodeState {
 				for n.lastApplied != n.commitIndex {
 					n.lastApplied++
 					entry := n.log.Get(n.lastApplied)
-					n.state.Apply(entry)
+					res := n.state.Apply(entry)
+					res.CurrentLeader = n.id
+					req := leader.getPendingWriteRequest(entry.Index)
+					if req != nil {
+						req.Response <- Res{
+							PeerID: n.id,
+							Msg:    res,
+						}
+					}
 				}
-				leader.serviceProposals()
 			}
 			leader.serviceReadProposals(&res)
 		case req := <-n.input:

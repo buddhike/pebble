@@ -14,6 +14,8 @@ enum Op {
 enum Error {
     NoError = 0;
     SessionNotFound = 1;
+    ServerError = 2;
+    ClientError = 3;
 }
 
 message VoteRequest {
@@ -50,7 +52,7 @@ message ProposeRequest {
     bytes value = 5;
 }
 
-message PropseResponse {
+message ProposeResponse {
     bool accepted = 1;
     string currentLeader = 2;
     bytes value = 3;
