@@ -69,6 +69,7 @@ func (w *WorkerService) Start() {
 			resp, err := http.Post(fmt.Sprintf("%s/assign/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
 			if err != nil {
 				log.Printf("Failed to make assign request: %v", err)
+				w.rotateManager()
 				time.Sleep(5 * time.Second)
 				continue
 			}

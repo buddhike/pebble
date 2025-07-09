@@ -2,9 +2,7 @@ package consumer
 
 import (
 	"context"
-	"fmt"
 	"log"
-	"os"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
@@ -38,14 +36,13 @@ func (l *Leader) Start() {
 func (l *Leader) elect() {
 	for {
 		// Create a session for the election
-		session, err := concurrency.NewSession(l.etcdClient)
+		session, err := concurrency.NewSession(l.etcdClient, concurrency.WithTTL(l.cfg.LeadershipTtlSeconds))
 		if err != nil {
 			log.Fatalf("failed to create session: %v", err)
 		}
 
 		// Generate a unique node ID (using hostname and PID)
-		hostname, _ := os.Hostname()
-		nodeID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+		nodeID := l.cfg.GetEtcdPeerName()
 
 		// Create an election
 		election := concurrency.NewElection(session, "/leader-election")

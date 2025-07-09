@@ -27,6 +27,7 @@ type ConsumerConfig struct {
 	ManagerListenAddress    string
 	EtcdListenClientAddress string
 	EtcdListenPeerAddress   string
+	LeadershipTtlSeconds    int
 }
 
 func (cfg *ConsumerConfig) GetClientConnectionUrls() []string {
@@ -127,6 +128,7 @@ func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.R
 		EtcdPeerUrls:            "http://0.0.0.0:11001",
 		EtcdClientUrls:          "http://0.0.0.0:12001",
 		ManagerUrls:             "http://0.0.0.0:13001",
+		LeadershipTtlSeconds:    60,
 	}
 
 	for _, opt := range opts {
@@ -138,6 +140,11 @@ func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.R
 		done:      make(chan struct{}),
 		processFn: processFn,
 	}
+}
+
+func NewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
+	allOpts := append(opts, WithLeadershipTtlSeconds(5))
+	return NewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
 }
 
 func WithManagerListenAddress(addr string) func(*ConsumerConfig) {
@@ -179,6 +186,18 @@ func WithEtcdClientUrls(urls string) func(*ConsumerConfig) {
 func WithKinesisClient(kds *kinesis.Client) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.KinesisClient = kds
+	}
+}
+
+func WithLeadershipTtlSeconds(seconds int) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.LeadershipTtlSeconds = seconds
+	}
+}
+
+func WithManagerID(id int) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.ManagerID = id
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
@@ -25,6 +26,7 @@ type ManagerService struct {
 	checkpoints      map[string]string
 	done             chan struct{}
 	stop             chan struct{}
+	workerHeartbeats map[string]time.Time
 }
 
 type Status struct {
@@ -32,7 +34,7 @@ type Status struct {
 }
 
 type assignmentData struct {
-	shards              map[string]struct{}
+	shards              map[string]types.Shard
 	lastAssignmentCount int
 }
 
@@ -63,12 +65,13 @@ type AssignResponse struct {
 
 func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}) *ManagerService {
 	return &ManagerService{
-		cfg:  cfg,
-		mut:  &sync.Mutex{},
-		kds:  kds,
-		kvs:  kvs,
-		done: make(chan struct{}),
-		stop: stop,
+		cfg:              cfg,
+		mut:              &sync.Mutex{},
+		kds:              kds,
+		kvs:              kvs,
+		done:             make(chan struct{}),
+		stop:             stop,
+		workerHeartbeats: make(map[string]time.Time),
 	}
 }
 
@@ -181,12 +184,29 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	m.workerHeartbeats[request.WorkerID] = time.Now()
+
+	var remove []string
+	for k, v := range m.assignmentData {
+		timeSinceLastHeartbeat := time.Since(m.workerHeartbeats[request.WorkerID])
+		if timeSinceLastHeartbeat > time.Second*5 {
+			remove = append(remove, k)
+			for _, v := range v.shards {
+				m.unassignedShards = append(m.unassignedShards, v)
+			}
+		}
+		delete(m.workerHeartbeats, k)
+	}
+	for _, k := range remove {
+		delete(m.assignmentData, k)
+	}
+
 	var ad *assignmentData
 	var assignments []Assignment
-	ad, _ = m.assignmentData[request.WorkerID]
+	ad = m.assignmentData[request.WorkerID]
 	if ad == nil {
 		ad = &assignmentData{
-			shards: make(map[string]struct{}),
+			shards: make(map[string]types.Shard),
 		}
 		m.assignmentData[request.WorkerID] = ad
 	}
@@ -201,7 +221,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 			ShardID:        *s.ShardId,
 			SequenceNumber: m.checkpoints[*s.ShardId],
 		})
-		ad.shards[*s.ShardId] = struct{}{}
+		ad.shards[*s.ShardId] = s
 	}
 	m.unassignedShards = m.unassignedShards[numberOfShardsToAssign:]
 
