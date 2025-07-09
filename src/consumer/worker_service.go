@@ -1,92 +1,117 @@
-package main
+package consumer
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+	"github.com/buddhike/pebble/aws"
+	"github.com/google/uuid"
 )
 
-type Worker struct {
-	workerID          string
-	port              int
-	streamConsumerArn string
-	kds               Kinesis
+type WorkerService struct {
+	cfg          *ConsumerConfig
+	id           string
+	kds          aws.Kinesis
+	done         chan struct{}
+	stop         chan struct{}
+	managerUrls  []string
+	managerIndex int
 }
 
-func NewWorker(workerID string, port int, streamConsumerArn string, kds Kinesis) *Worker {
-	return &Worker{
-		workerID:          workerID,
-		port:              port,
-		streamConsumerArn: streamConsumerArn,
-		kds:               kds,
+func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}) *WorkerService {
+	return &WorkerService{
+		cfg:         cfg,
+		id:          fmt.Sprintf("%s-%s", cfg.Name, uuid.NewString()),
+		kds:         kds,
+		done:        make(chan struct{}),
+		stop:        stop,
+		managerUrls: strings.Split(cfg.ManagerUrls, ","),
 	}
 }
 
-func (w *Worker) Start() {
-	for {
-		// Create assign request
-		assignReq := AssignRequest{
-			WorkerID: w.workerID,
-		}
+func (w *WorkerService) currentManager() string {
+	return w.managerUrls[w.managerIndex]
+}
 
-		// Marshal request to JSON
-		reqBody, err := json.Marshal(assignReq)
-		if err != nil {
-			log.Printf("Failed to marshal assign request: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
+func (w *WorkerService) rotateManager() {
+	w.managerIndex++
+	if w.managerIndex == len(w.managerUrls) {
+		w.managerIndex = 0
+	}
+}
 
-		// Make HTTP request to manager
-		resp, err := http.Post("http://localhost:9000/assign/", "application/json", bytes.NewBuffer(reqBody))
-		if err != nil {
-			log.Printf("Failed to make assign request: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Read response body
-		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			log.Printf("Failed to read response body: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Unmarshal response
-		var assignResp AssignResponse
-		err = json.Unmarshal(respBody, &assignResp)
-		if err != nil {
-			log.Printf("Failed to unmarshal assign response: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		// Check if we got any assignments
-		if len(assignResp.Assignments) > 0 {
-			log.Printf("Received %d shard assignments", len(assignResp.Assignments))
-			for _, assignment := range assignResp.Assignments {
-				w.processShard(assignment)
+func (w *WorkerService) Start() {
+	go func() {
+		for {
+			// Create assign request
+			assignReq := AssignRequest{
+				WorkerID: w.id,
 			}
-		} else {
-			log.Printf("No shard assignments received")
+
+			// Marshal request to JSON
+			reqBody, err := json.Marshal(assignReq)
+			if err != nil {
+				log.Printf("Failed to marshal assign request: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			// Make HTTP request to manager
+			resp, err := http.Post(fmt.Sprintf("%s/assign/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
+			if err != nil {
+				log.Printf("Failed to make assign request: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			// Read response body
+			respBody, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				log.Printf("Failed to read response body: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			// Unmarshal response
+			var assignResp AssignResponse
+			err = json.Unmarshal(respBody, &assignResp)
+			if err != nil {
+				log.Printf("Failed to unmarshal assign response: %v %s", err, string(respBody))
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			if assignResp.Status.NotInService {
+				w.rotateManager()
+			}
+
+			// Check if we got any assignments
+			if len(assignResp.Assignments) > 0 {
+				log.Printf("Received %d shard assignments", len(assignResp.Assignments))
+				for _, assignment := range assignResp.Assignments {
+					w.processShard(assignment)
+				}
+			} else {
+				log.Printf("No shard assignments received")
+			}
+
+			// Wait before next request
+			time.Sleep(5 * time.Second)
 		}
-
-		// Wait before next request
-		time.Sleep(5 * time.Second)
-	}
-
+	}()
 }
 
-func (w *Worker) processShard(assignment Assignment) {
+func (w *WorkerService) processShard(assignment Assignment) {
 	// Determine starting position for subscription
 	var startingPosition types.StartingPosition
 	if assignment.SequenceNumber == "LATEST" {
@@ -102,7 +127,7 @@ func (w *Worker) processShard(assignment Assignment) {
 
 	// Create subscription input
 	subscribeInput := &kinesis.SubscribeToShardInput{
-		ConsumerARN:      &w.streamConsumerArn,
+		ConsumerARN:      &w.cfg.EfoConsumerArn,
 		ShardId:          &assignment.ShardID,
 		StartingPosition: &startingPosition,
 	}
@@ -129,14 +154,14 @@ func (w *Worker) processShard(assignment Assignment) {
 
 		// Process records
 		for _, record := range evt.Value.Records {
-			log.Printf("Processing record from shard %s: key: %s value: %s", assignment.ShardID, *record.PartitionKey, string(record.Data))
+			w.cfg.ProcessFn(record)
 		}
 
 		// Checkpoint after processing records
 		if len(evt.Value.Records) > 0 {
 			lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
 			checkpointReq := CheckpointRequest{
-				WorkerID:       w.workerID,
+				WorkerID:       w.id,
 				ShardID:        assignment.ShardID,
 				SequenceNumber: *lastRecord.SequenceNumber,
 			}
@@ -147,7 +172,7 @@ func (w *Worker) processShard(assignment Assignment) {
 				continue
 			}
 
-			resp, err := http.Post("http://localhost:9000/checkpoint/", "application/json", bytes.NewBuffer(reqBody))
+			resp, err := http.Post(fmt.Sprintf("%s/checkpoint/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
 			if err != nil {
 				log.Printf("Failed to make checkpoint request: %v", err)
 				continue

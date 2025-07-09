@@ -11,7 +11,7 @@
             "request": "launch",
             "mode": "auto",
             "program": "${fileDirname}",
-            "args": ["--stream", "test2", "--stream-consumer-arn", "arn:aws:kinesis:ap-southeast-2:767660010185:stream/test2/consumer/test:1731384474", "--manager-name", "m1", "--listen-peer-urls", "http://localhost:9601", "--listen-client-urls", "http://localhost:9701", "--advertised-client-urls", "http://localhost:9701", "--initial-cluster", "m1=http://localhost:9601,m2=http://localhost:9602,m3=http://localhost:9603", "--client-connection-urls", "http://localhost:9701,http://localhost:9702,http://localhost:9703", "--advertised-peer-urls", "http://localhost:9601"],
+            "args": ["--stream", "test2", "--stream-consumer-arn", "arn:aws:kinesis:ap-southeast-2:767660010185:stream/test2/consumer/test:1731384474"],
         }
     ]
 }

@@ -1,6 +1,13 @@
-module pebble
+module sample
 
 go 1.23.4
+
+replace github.com/buddhike/pebble => ../src
+
+require (
+	github.com/aws/aws-sdk-go-v2/service/kinesis v1.35.3
+	github.com/buddhike/pebble v0.0.0-00010101000000-000000000000
+)
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.36.5 // indirect
@@ -13,7 +20,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.12.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.12.17 // indirect
-	github.com/aws/aws-sdk-go-v2/service/kinesis v1.35.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sso v1.25.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.30.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.34.0 // indirect

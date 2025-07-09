@@ -235,3 +235,4 @@ build
 third_party
 .build/
 default.etcd/
+*.etcd/

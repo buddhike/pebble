@@ -1,4 +1,4 @@
-package main
+package consumer
 
 import (
 	"context"
@@ -10,20 +10,21 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+	"github.com/buddhike/pebble/aws"
 )
 
 type ManagerService struct {
-	port              int
-	mut               *sync.Mutex
-	inService         bool
-	stream            string
-	streamConsumerArn string
-	kds               Kinesis
-	shards            []types.Shard
-	unassignedShards  []types.Shard
-	assignmentData    map[string]*assignmentData
-	kvs               KVS
-	checkpoints       map[string]string
+	mut              *sync.Mutex
+	inService        bool
+	kds              aws.Kinesis
+	kvs              KVS
+	cfg              *ConsumerConfig
+	shards           []types.Shard
+	unassignedShards []types.Shard
+	assignmentData   map[string]*assignmentData
+	checkpoints      map[string]string
+	done             chan struct{}
+	stop             chan struct{}
 }
 
 type Status struct {
@@ -60,22 +61,29 @@ type AssignResponse struct {
 	Assignments []Assignment
 }
 
-func NewManagerService(port int, stream, streamConsumerArn string, kds Kinesis, kvs KVS) *ManagerService {
+func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}) *ManagerService {
 	return &ManagerService{
-		port:              port,
-		mut:               &sync.Mutex{},
-		stream:            stream,
-		streamConsumerArn: streamConsumerArn,
-		kds:               kds,
-		kvs:               kvs,
+		cfg:  cfg,
+		mut:  &sync.Mutex{},
+		kds:  kds,
+		kvs:  kvs,
+		done: make(chan struct{}),
+		stop: stop,
 	}
 }
 
 func (m *ManagerService) Start() error {
-	http.HandleFunc("/checkpoint/", m.Checkpoint)
-	http.HandleFunc("/assign/", m.Assign)
-	http.HandleFunc("/status/", m.Status)
-	return http.ListenAndServe(fmt.Sprintf(":%d", m.port), nil)
+	url, err := m.cfg.GetManagerListenUrl()
+	if err != nil {
+		return err
+	}
+	go func() {
+		http.HandleFunc("/checkpoint/", m.Checkpoint)
+		http.HandleFunc("/assign/", m.Assign)
+		http.HandleFunc("/status/", m.Status)
+		http.ListenAndServe(fmt.Sprintf("%s:%s", url.Hostname(), url.Port()), nil)
+	}()
+	return nil
 }
 
 func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
@@ -237,7 +245,7 @@ func (m *ManagerService) SetInService(inService bool) {
 	if m.inService {
 		if m.shards == nil {
 			input := &kinesis.ListShardsInput{
-				StreamName: &m.stream,
+				StreamName: &m.cfg.StreamName,
 			}
 			out, err := m.kds.ListShards(context.Background(), input)
 			if err != nil {
