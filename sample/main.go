@@ -35,7 +35,7 @@ func main() {
 		fmt.Printf("Processing record: %s\n", *record.PartitionKey)
 	}
 
-	c := consumer.NewDevelopmentConsumer("my-consumer", stream, streamConsumerArn, processFn, managerID, managerUrls, clientUrls, peerUrls)
+	c := consumer.MustNewDevelopmentConsumer("my-consumer", stream, streamConsumerArn, processFn, managerID, managerUrls, clientUrls, peerUrls)
 
 	// Start the consumer
 	err := c.Start()

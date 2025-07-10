@@ -2,10 +2,10 @@ package consumer
 
 import (
 	"context"
-	"log"
 
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
+	"go.uber.org/zap"
 )
 
 type Leader struct {
@@ -14,15 +14,17 @@ type Leader struct {
 	done       chan struct{}
 	stop       chan struct{}
 	mgr        *ManagerService
+	logger     *zap.Logger
 }
 
-func NewLeader(cfg *ConsumerConfig, mgr *ManagerService, etcdClient *clientv3.Client, stop chan struct{}) *Leader {
+func NewLeader(cfg *ConsumerConfig, mgr *ManagerService, etcdClient *clientv3.Client, stop chan struct{}, logger *zap.Logger) *Leader {
 	return &Leader{
 		cfg:        cfg,
 		etcdClient: etcdClient,
 		done:       make(chan struct{}),
 		stop:       stop,
 		mgr:        mgr,
+		logger:     logger.Named("leader"),
 	}
 }
 
@@ -41,7 +43,7 @@ func (l *Leader) elect(ctx context.Context) {
 		// Create a session for the election
 		session, err := concurrency.NewSession(l.etcdClient, concurrency.WithTTL(l.cfg.LeadershipTtlSeconds))
 		if err != nil {
-			log.Fatalf("failed to create session: %v", err)
+			l.logger.Fatal("failed to create session", zap.Error(err))
 		}
 
 		// Generate a unique node ID (using hostname and PID)
@@ -50,17 +52,17 @@ func (l *Leader) elect(ctx context.Context) {
 		// Create an election
 		election := concurrency.NewElection(session, "/leader-election")
 
-		log.Printf("Node %s attempting to become leader...", nodeID)
+		l.logger.Info("node attempting to become leader", zap.String("node_id", nodeID))
 
 		if err := election.Campaign(ctx, nodeID); err != nil {
-			log.Fatalf("failed to campaign for leadership: %v", err)
+			l.logger.Error("failed to campaign for leadership", zap.Error(err))
 			return
 		}
 
-		log.Printf("Node %s successfully became leader!", nodeID)
+		l.logger.Info("node successfully became leader", zap.String("node_id", nodeID))
 
 		// Perform leader work
-		log.Printf("Node %s is performing leader work...", nodeID)
+		l.logger.Info("node is performing leader work", zap.String("node_id", nodeID))
 		l.mgr.SetInService(true)
 
 		// Observe leadership changes (optional - for monitoring)
@@ -71,12 +73,12 @@ func (l *Leader) elect(ctx context.Context) {
 				case resp := <-observeCh:
 					if len(resp.Kvs) > 0 {
 						currentLeader := string(resp.Kvs[0].Value)
-						log.Printf("Current leader is: %s", currentLeader)
+						l.logger.Info("current leader", zap.String("leader", currentLeader))
 					} else {
-						log.Printf("No current leader")
+						l.logger.Info("no current leader")
 					}
 				case <-session.Done():
-					log.Printf("Session ended, node %s lost leadership", nodeID)
+					l.logger.Info("session ended, node lost leadership", zap.String("node_id", nodeID))
 					return
 				}
 			}
@@ -85,14 +87,14 @@ func (l *Leader) elect(ctx context.Context) {
 		// Keep the leader alive until session ends
 		select {
 		case <-session.Done():
-			log.Printf("Node %s is no longer the leader", nodeID)
+			l.logger.Info("node is no longer the leader", zap.String("node_id", nodeID))
 			l.mgr.SetInService(false)
 			session.Close()
 		case <-ctx.Done():
 			session.Orphan()
 			err := session.Close()
 			if err != nil {
-				log.Print(err)
+				l.logger.Error("error closing session", zap.Error(err))
 			}
 			return
 		}

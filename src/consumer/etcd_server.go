@@ -5,6 +5,7 @@ import (
 	"time"
 
 	etcdembed "go.etcd.io/etcd/server/v3/embed"
+	"go.uber.org/zap"
 )
 
 type EtcdServer struct {
@@ -12,14 +13,16 @@ type EtcdServer struct {
 	done             chan struct{}
 	stop             chan struct{}
 	startStopTimeout time.Duration
+	logger           *zap.Logger
 }
 
-func NewEtcdServer(cfg *ConsumerConfig, stop chan struct{}) *EtcdServer {
+func NewEtcdServer(cfg *ConsumerConfig, stop chan struct{}, logger *zap.Logger) *EtcdServer {
 	return &EtcdServer{
 		cfg:              cfg,
 		done:             make(chan struct{}),
 		stop:             stop,
 		startStopTimeout: time.Second * time.Duration(cfg.EtcdStartTimeoutSeconds),
+		logger:           logger.Named("etcdserver"),
 	}
 }
 
@@ -60,26 +63,26 @@ func (s *EtcdServer) Start() error {
 		defer close(s.done)
 		e, err := etcdembed.StartEtcd(cfg)
 		if err != nil {
-			fmt.Println(err)
+			s.logger.Error("embedded etcd server failed to start", zap.Error(err))
 			return
 		}
 		select {
 		case <-e.Server.ReadyNotify():
-			fmt.Println("Embedded etcd server is ready!")
+			s.logger.Info("embedded etcd server is ready")
 		case <-time.After(s.startStopTimeout):
-			fmt.Println("Embedded etcd server took too long to start")
+			s.logger.Error("embedded etcd server took too long to start")
 		}
 
 		<-s.stop
-		fmt.Println("Shutting down etcd server")
+		s.logger.Info("shutting down etcd server")
 		e.Close()
-		fmt.Println("EtcdServer closed")
+		s.logger.Info("etcdserver closed")
 
 		select {
 		case <-e.Server.StopNotify():
-			fmt.Println("Embedded etcd server stopped")
+			s.logger.Info("embedded etcd server stopped")
 		case <-time.After(s.startStopTimeout):
-			fmt.Println("Embedded etcd server took too long to stop")
+			s.logger.Error("embedded etcd server took too long to stop")
 		}
 	}()
 

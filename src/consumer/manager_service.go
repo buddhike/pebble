@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
+	"go.uber.org/zap"
 )
 
 type ManagerService struct {
@@ -28,6 +29,7 @@ type ManagerService struct {
 	stop               chan struct{}
 	workerHeartbeats   map[string]time.Time
 	healthcheckTimeout time.Duration
+	logger             *zap.Logger
 }
 
 type Status struct {
@@ -64,7 +66,7 @@ type AssignResponse struct {
 	Assignments []Assignment
 }
 
-func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}) *ManagerService {
+func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}, logger *zap.Logger) *ManagerService {
 	return &ManagerService{
 		cfg:                cfg,
 		mut:                &sync.Mutex{},
@@ -74,6 +76,7 @@ func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan 
 		stop:               stop,
 		workerHeartbeats:   make(map[string]time.Time),
 		healthcheckTimeout: time.Second * time.Duration(cfg.HealthcheckTimeoutSeconds),
+		logger:             logger.Named("managerservice").With(zap.Int("managerid", cfg.ManagerID)),
 	}
 }
 
@@ -284,6 +287,7 @@ func (m *ManagerService) SetInService(inService bool) {
 			}
 			out, err := m.kds.ListShards(context.Background(), input)
 			if err != nil {
+				m.logger.Error("failed to list shards", zap.Error(err))
 				panic(err)
 			}
 			m.shards = out.Shards
@@ -295,6 +299,7 @@ func (m *ManagerService) SetInService(inService bool) {
 		for _, s := range m.unassignedShards {
 			cp, err := m.kvs.Get(context.Background(), *s.ShardId)
 			if err != nil {
+				m.logger.Error("failed to get checkpoint from kvs", zap.Error(err))
 				panic(err)
 			}
 			if cp.Count > 0 {
@@ -311,7 +316,7 @@ func (m *ManagerService) Health(w http.ResponseWriter, r *http.Request) {
 	_, err := m.kvs.Get(ctx, "/healthcheck")
 	cancel()
 	if err != nil {
-		fmt.Println("EtcdServer Healthcheck failed", err)
+		m.logger.Error("etcdserver healthcheck failed", zap.Error(err))
 		w.WriteHeader(http.StatusServiceUnavailable)
 		w.Write([]byte(fmt.Sprintf("unhealthy-%s-%d: %v", m.cfg.Name, m.cfg.ManagerID, err)))
 		return

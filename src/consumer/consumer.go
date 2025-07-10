@@ -2,14 +2,15 @@ package consumer
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
+	"github.com/google/uuid"
 	clientv3 "go.etcd.io/etcd/client/v3"
+	"go.uber.org/zap"
 )
 
 type Consumer struct {
@@ -20,10 +21,12 @@ type Consumer struct {
 	kvs                  KVS
 	kds                  aws.Kinesis
 	componentsDoneNotify map[string]chan struct{}
+	logger               *zap.Logger
 }
 
-func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
+func MustNewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
 	config := &ConsumerConfig{
+		ID:                        uuid.NewString(),
 		Name:                      name,
 		StreamName:                streamName,
 		EfoConsumerArn:            efoConsumerArn,
@@ -44,18 +47,24 @@ func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.R
 		opt(config)
 	}
 
+	logger, err := zap.NewProduction()
+	if err != nil {
+		panic(err)
+	}
+
 	return &Consumer{
 		cfg:                  config,
 		done:                 make(chan struct{}),
 		stop:                 make(chan struct{}),
 		componentsDoneNotify: make(map[string]chan struct{}),
 		processFn:            processFn,
+		logger:               logger.Named("consumer").With(zap.String("name", config.Name), zap.String("workerid", config.ID)),
 	}
 }
 
-func NewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
+func MustNewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
 	allOpts := append(opts, WithLeadershipTtlSeconds(5), WithHealthCheckTimeoutSeconds(1), WithEtcdStartTimeoutSeconds(10))
-	return NewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
+	return MustNewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
 }
 
 func (c *Consumer) Start() error {
@@ -81,25 +90,25 @@ func (c *Consumer) Start() error {
 			c.kds = c.cfg.KinesisClient
 		}
 
-		etcdServer := NewEtcdServer(c.cfg, c.stop)
+		etcdServer := NewEtcdServer(c.cfg, c.stop, c.logger)
 		err = etcdServer.Start()
 		if err != nil {
 			return err
 		}
 		c.componentsDoneNotify["EtcdServer"] = etcdServer.done
 
-		mgr := NewManagerService(c.cfg, c.kds, c.kvs, c.stop)
+		mgr := NewManagerService(c.cfg, c.kds, c.kvs, c.stop, c.logger)
 		err = mgr.Start()
 		if err != nil {
 			return err
 		}
 		c.componentsDoneNotify["ManagerService"] = mgr.done
 
-		leader := NewLeader(c.cfg, mgr, cli, c.stop)
+		leader := NewLeader(c.cfg, mgr, cli, c.stop, c.logger)
 		c.componentsDoneNotify["Leader"] = leader.done
 		leader.Start()
 
-		worker := NewWorker(c.cfg, c.kds, c.stop)
+		worker := NewWorker(c.cfg, c.kds, c.stop, c.logger)
 		c.componentsDoneNotify["Worker"] = worker.done
 		worker.Start()
 		return nil
@@ -111,9 +120,9 @@ func (c *Consumer) Start() error {
 func (c *Consumer) Stop() {
 	close(c.stop)
 	for k, v := range c.componentsDoneNotify {
-		fmt.Printf("Shudown %s: initiated \n", k)
+		c.logger.Info("shutdown initiated", zap.String("component", k))
 		<-v
-		fmt.Printf("Shudown %s: ok \n", k)
+		c.logger.Info("shutdown complete", zap.String("component", k))
 	}
 	close(c.done)
 }

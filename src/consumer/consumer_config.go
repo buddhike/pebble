@@ -10,6 +10,7 @@ import (
 )
 
 type ConsumerConfig struct {
+	ID                        string
 	StreamName                string
 	EfoConsumerArn            string
 	ProcessFn                 func(types.Record)
