@@ -82,13 +82,25 @@ func (m *ManagerService) Start() error {
 	if err != nil {
 		return err
 	}
+	server := &http.Server{
+		Addr:    fmt.Sprintf("%s:%s", url.Hostname(), url.Port()),
+		Handler: http.DefaultServeMux,
+	}
+
 	go func() {
 		http.HandleFunc("/checkpoint/", m.Checkpoint)
 		http.HandleFunc("/assign/", m.Assign)
 		http.HandleFunc("/status/", m.Status)
 		http.HandleFunc("/health/", m.Health)
-		http.ListenAndServe(fmt.Sprintf("%s:%s", url.Hostname(), url.Port()), nil)
+		server.ListenAndServe()
+		close(m.done)
 	}()
+
+	go func() {
+		<-m.stop
+		server.Close()
+	}()
+
 	return nil
 }
 

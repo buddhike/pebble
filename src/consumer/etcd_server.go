@@ -16,9 +16,10 @@ type EtcdServer struct {
 
 func NewEtcdServer(cfg *ConsumerConfig, stop chan struct{}) *EtcdServer {
 	return &EtcdServer{
-		cfg:  cfg,
-		done: make(chan struct{}),
-		stop: stop,
+		cfg:              cfg,
+		done:             make(chan struct{}),
+		stop:             stop,
+		startStopTimeout: time.Second * time.Duration(cfg.EtcdStartTimeoutSeconds),
 	}
 }
 
@@ -53,13 +54,15 @@ func (s *EtcdServer) Start() error {
 	cfg.ListenPeerUrls = listenPeerUrls
 	cfg.AdvertisePeerUrls = advertisePeerUrls
 	cfg.InitialCluster = s.cfg.GetInitialCluster()
-
-	e, err := etcdembed.StartEtcd(cfg)
-	if err != nil {
-		return err
-	}
+	cfg.LogFormat = "console"
 
 	go func() {
+		defer close(s.done)
+		e, err := etcdembed.StartEtcd(cfg)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
 		select {
 		case <-e.Server.ReadyNotify():
 			fmt.Println("Embedded etcd server is ready!")
@@ -68,7 +71,9 @@ func (s *EtcdServer) Start() error {
 		}
 
 		<-s.stop
-		e.Server.Stop()
+		fmt.Println("Shutting down etcd server")
+		e.Close()
+		fmt.Println("EtcdServer closed")
 
 		select {
 		case <-e.Server.StopNotify():
@@ -76,7 +81,6 @@ func (s *EtcdServer) Start() error {
 		case <-time.After(s.startStopTimeout):
 			fmt.Println("Embedded etcd server took too long to stop")
 		}
-		close(s.done)
 	}()
 
 	return nil

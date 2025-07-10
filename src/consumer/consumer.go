@@ -29,6 +29,7 @@ type ConsumerConfig struct {
 	EtcdListenPeerAddress     string
 	LeadershipTtlSeconds      int
 	HealthcheckTimeoutSeconds int
+	EtcdStartTimeoutSeconds   int
 }
 
 func (cfg *ConsumerConfig) GetClientConnectionUrls() []string {
@@ -172,12 +173,20 @@ func WithHealthCheckTimeoutSeconds(timeout int) func(*ConsumerConfig) {
 	}
 }
 
+func WithEtcdStartTimeoutSeconds(timeout int) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.EtcdStartTimeoutSeconds = timeout
+	}
+}
+
 type Consumer struct {
-	cfg       *ConsumerConfig
-	done      chan struct{}
-	processFn func(types.Record)
-	kvs       KVS
-	kds       aws.Kinesis
+	cfg                  *ConsumerConfig
+	done                 chan struct{}
+	stop                 chan struct{}
+	processFn            func(types.Record)
+	kvs                  KVS
+	kds                  aws.Kinesis
+	componentsDoneNotify map[string]chan struct{}
 }
 
 func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
@@ -195,6 +204,7 @@ func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.R
 		ManagerUrls:               "http://0.0.0.0:13001",
 		LeadershipTtlSeconds:      60,
 		HealthcheckTimeoutSeconds: 5,
+		EtcdStartTimeoutSeconds:   30,
 	}
 
 	for _, opt := range opts {
@@ -202,14 +212,16 @@ func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.R
 	}
 
 	return &Consumer{
-		cfg:       config,
-		done:      make(chan struct{}),
-		processFn: processFn,
+		cfg:                  config,
+		done:                 make(chan struct{}),
+		stop:                 make(chan struct{}),
+		componentsDoneNotify: make(map[string]chan struct{}),
+		processFn:            processFn,
 	}
 }
 
 func NewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
-	allOpts := append(opts, WithLeadershipTtlSeconds(5), WithHealthCheckTimeoutSeconds(1))
+	allOpts := append(opts, WithLeadershipTtlSeconds(5), WithHealthCheckTimeoutSeconds(1), WithEtcdStartTimeoutSeconds(10))
 	return NewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
 }
 
@@ -236,29 +248,41 @@ func (c *Consumer) Start() error {
 			c.kds = c.cfg.KinesisClient
 		}
 
-		stop := make(chan struct{})
-
-		etcdServer := NewEtcdServer(c.cfg, stop)
+		etcdServer := NewEtcdServer(c.cfg, c.stop)
 		err = etcdServer.Start()
 		if err != nil {
 			return err
 		}
+		c.componentsDoneNotify["EtcdServer"] = etcdServer.done
 
-		mgr := NewManagerService(c.cfg, c.kds, c.kvs, stop)
+		mgr := NewManagerService(c.cfg, c.kds, c.kvs, c.stop)
 		err = mgr.Start()
 		if err != nil {
 			return err
 		}
+		c.componentsDoneNotify["ManagerService"] = mgr.done
 
-		leader := NewLeader(c.cfg, mgr, cli, stop)
+		leader := NewLeader(c.cfg, mgr, cli, c.stop)
+		c.componentsDoneNotify["Leader"] = leader.done
 		leader.Start()
 
-		worker := NewWorker(c.cfg, c.kds, stop)
+		worker := NewWorker(c.cfg, c.kds, c.stop)
+		c.componentsDoneNotify["Worker"] = worker.done
 		worker.Start()
 		return nil
 	}()
 
 	return nil
+}
+
+func (c *Consumer) Stop() {
+	close(c.stop)
+	for k, v := range c.componentsDoneNotify {
+		fmt.Printf("Shudown %s: initiated \n", k)
+		<-v
+		fmt.Printf("Shudown %s: ok \n", k)
+	}
+	close(c.done)
 }
 
 func (c *Consumer) Done() <-chan struct{} {

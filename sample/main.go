@@ -3,6 +3,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/consumer"
@@ -33,6 +36,13 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	notifyChan := make(chan os.Signal, 1)
+	signal.Notify(notifyChan, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		<-notifyChan
+		c.Stop()
+	}()
 
 	// Wait for the consumer to finish
 	<-c.Done()

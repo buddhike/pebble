@@ -28,12 +28,15 @@ func NewLeader(cfg *ConsumerConfig, mgr *ManagerService, etcdClient *clientv3.Cl
 
 func (l *Leader) Start() {
 	go func() {
-		l.elect()
-		close(l.done)
+		ctx, cancel := context.WithCancel(context.Background())
+		go l.elect(ctx)
+		<-l.stop
+		cancel()
 	}()
 }
 
-func (l *Leader) elect() {
+func (l *Leader) elect(ctx context.Context) {
+	defer close(l.done)
 	for {
 		// Create a session for the election
 		session, err := concurrency.NewSession(l.etcdClient, concurrency.WithTTL(l.cfg.LeadershipTtlSeconds))
@@ -49,10 +52,9 @@ func (l *Leader) elect() {
 
 		log.Printf("Node %s attempting to become leader...", nodeID)
 
-		// Campaign to become leader
-		ctx := context.Background()
 		if err := election.Campaign(ctx, nodeID); err != nil {
 			log.Fatalf("failed to campaign for leadership: %v", err)
+			return
 		}
 
 		log.Printf("Node %s successfully became leader!", nodeID)
@@ -83,8 +85,10 @@ func (l *Leader) elect() {
 		// Keep the leader alive until session ends
 		select {
 		case <-session.Done():
+			log.Printf("Node %s is no longer the leader", nodeID)
 			l.mgr.SetInService(false)
-		case <-l.stop:
+			session.Close()
+		case <-ctx.Done():
 			session.Orphan()
 			err := session.Close()
 			if err != nil {
@@ -92,7 +96,5 @@ func (l *Leader) elect() {
 			}
 			return
 		}
-		log.Printf("Node %s is no longer the leader", nodeID)
-		session.Close()
 	}
 }

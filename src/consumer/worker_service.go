@@ -51,68 +51,108 @@ func (w *WorkerService) rotateManager() {
 
 func (w *WorkerService) Start() {
 	go func() {
+		defer close(w.done)
+
+		processors := make([]chan struct{}, 0)
 		for {
-			// Create assign request
-			assignReq := AssignRequest{
-				WorkerID: w.id,
-			}
-
-			// Marshal request to JSON
-			reqBody, err := json.Marshal(assignReq)
-			if err != nil {
-				log.Printf("Failed to marshal assign request: %v", err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Make HTTP request to manager
-			resp, err := http.Post(fmt.Sprintf("%s/assign/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
-			if err != nil {
-				log.Printf("Failed to make assign request: %v", err)
-				w.rotateManager()
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Read response body
-			respBody, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				log.Printf("Failed to read response body: %v", err)
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			// Unmarshal response
-			var assignResp AssignResponse
-			err = json.Unmarshal(respBody, &assignResp)
-			if err != nil {
-				log.Printf("Failed to unmarshal assign response: %v %s", err, string(respBody))
-				time.Sleep(5 * time.Second)
-				continue
-			}
-
-			if assignResp.Status.NotInService {
-				w.rotateManager()
-			}
-
-			// Check if we got any assignments
-			if len(assignResp.Assignments) > 0 {
-				log.Printf("Received %d shard assignments", len(assignResp.Assignments))
-				for _, assignment := range assignResp.Assignments {
-					w.processShard(assignment)
+			select {
+			case <-w.stop:
+				log.Printf("Worker %s received stop signal, shutting down", w.id)
+				return
+			default:
+				// Create assign request
+				assignReq := AssignRequest{
+					WorkerID: w.id,
 				}
-			} else {
-				log.Printf("No shard assignments received")
-			}
 
-			// Wait before next request
-			time.Sleep(5 * time.Second)
+				// Marshal request to JSON
+				reqBody, err := json.Marshal(assignReq)
+				if err != nil {
+					log.Printf("Failed to marshal assign request: %v", err)
+					select {
+					case <-w.stop:
+						log.Printf("Worker %s received stop signal during error handling, shutting down", w.id)
+						return
+					case <-time.After(5 * time.Second):
+						continue
+					}
+				}
+
+				// Make HTTP request to manager
+				resp, err := http.Post(fmt.Sprintf("%s/assign/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
+				if err != nil {
+					log.Printf("Failed to make assign request: %v", err)
+					w.rotateManager()
+					select {
+					case <-w.stop:
+						log.Printf("Worker %s received stop signal during error handling, shutting down", w.id)
+						return
+					case <-time.After(5 * time.Second):
+						continue
+					}
+				}
+
+				// Read response body
+				respBody, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					log.Printf("Failed to read response body: %v", err)
+					select {
+					case <-w.stop:
+						log.Printf("Worker %s received stop signal during error handling, shutting down", w.id)
+						return
+					case <-time.After(5 * time.Second):
+						continue
+					}
+				}
+
+				// Unmarshal response
+				var assignResp AssignResponse
+				err = json.Unmarshal(respBody, &assignResp)
+				if err != nil {
+					log.Printf("Failed to unmarshal assign response: %v %s", err, string(respBody))
+					select {
+					case <-w.stop:
+						log.Printf("Worker %s received stop signal during error handling, shutting down", w.id)
+						return
+					case <-time.After(5 * time.Second):
+						continue
+					}
+				}
+
+				if assignResp.Status.NotInService {
+					w.rotateManager()
+				}
+
+				// Check if we got any assignments
+				if len(assignResp.Assignments) > 0 {
+					log.Printf("Received %d shard assignments", len(assignResp.Assignments))
+					for _, assignment := range assignResp.Assignments {
+						done := make(chan struct{})
+						go w.processShard(assignment, done)
+					}
+				} else {
+					log.Printf("No shard assignments received")
+				}
+
+				// Wait before next request with stop signal handling
+				select {
+				case <-w.stop:
+					log.Printf("Worker %s received stop signal during wait, shutting down", w.id)
+					for _, p := range processors {
+						<-p
+					}
+					return
+				case <-time.After(5 * time.Second):
+					// Continue to next iteration
+				}
+			}
 		}
 	}()
 }
 
-func (w *WorkerService) processShard(assignment Assignment) {
+func (w *WorkerService) processShard(assignment Assignment, done chan struct{}) {
+	defer close(done)
 	// Determine starting position for subscription
 	var startingPosition types.StartingPosition
 	if assignment.SequenceNumber == "LATEST" {
@@ -140,70 +180,83 @@ func (w *WorkerService) processShard(assignment Assignment) {
 		return
 	}
 
-	// Process events from the subscription
-	for event := range output.GetStream().Events() {
-		if event == nil {
-			log.Printf("Error in shard subscription %s", assignment.ShardID)
-			return
-		}
-
-		evt := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent)
-		if evt == nil {
-			log.Printf("Unexpected event type")
-			return
-		}
-
-		// Process records
-		for _, record := range evt.Value.Records {
-			w.cfg.ProcessFn(record)
-		}
-
-		// Checkpoint after processing records
-		if len(evt.Value.Records) > 0 {
-			lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
-			checkpointReq := CheckpointRequest{
-				WorkerID:       w.id,
-				ShardID:        assignment.ShardID,
-				SequenceNumber: *lastRecord.SequenceNumber,
-			}
-
-			reqBody, err := json.Marshal(checkpointReq)
-			if err != nil {
-				log.Printf("Failed to marshal checkpoint request: %v", err)
-				continue
-			}
-
-			resp, err := http.Post(fmt.Sprintf("%s/checkpoint/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
-			if err != nil {
-				log.Printf("Failed to make checkpoint request: %v", err)
-				continue
-			}
-
-			respBody, err := io.ReadAll(resp.Body)
-			resp.Body.Close()
-			if err != nil {
-				log.Printf("Failed to read checkpoint response: %v", err)
-				continue
-			}
-
-			var checkpointResp CheckpointResponse
-			err = json.Unmarshal(respBody, &checkpointResp)
-			if err != nil {
-				log.Printf("Failed to unmarshal checkpoint response: %v", err)
-				continue
-			}
-
-			if checkpointResp.OwnershipChanged {
-				log.Printf("Ownership of shard %s changed, stopping processing", assignment.ShardID)
+	// Process events from the subscription with stop signal handling
+	eventStream := output.GetStream().Events()
+	for {
+		select {
+		case event, ok := <-eventStream:
+			if !ok {
+				log.Printf("Event stream closed for shard %s", assignment.ShardID)
 				return
 			}
 
-			if checkpointResp.NotInService {
-				log.Printf("Manager not in service, stopping processing of shard %s", assignment.ShardID)
+			if event == nil {
+				log.Printf("Error in shard subscription %s", assignment.ShardID)
 				return
 			}
 
-			log.Printf("Successfully checkpointed shard %s at sequence number %s", assignment.ShardID, *lastRecord.SequenceNumber)
+			evt := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent)
+			if evt == nil {
+				log.Printf("Unexpected event type")
+				return
+			}
+
+			// Process records
+			for _, record := range evt.Value.Records {
+				w.cfg.ProcessFn(record)
+			}
+
+			// Checkpoint after processing records
+			if len(evt.Value.Records) > 0 {
+				lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
+				checkpointReq := CheckpointRequest{
+					WorkerID:       w.id,
+					ShardID:        assignment.ShardID,
+					SequenceNumber: *lastRecord.SequenceNumber,
+				}
+
+				reqBody, err := json.Marshal(checkpointReq)
+				if err != nil {
+					log.Printf("Failed to marshal checkpoint request: %v", err)
+					continue
+				}
+
+				resp, err := http.Post(fmt.Sprintf("%s/checkpoint/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
+				if err != nil {
+					log.Printf("Failed to make checkpoint request: %v", err)
+					continue
+				}
+
+				respBody, err := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				if err != nil {
+					log.Printf("Failed to read checkpoint response: %v", err)
+					continue
+				}
+
+				var checkpointResp CheckpointResponse
+				err = json.Unmarshal(respBody, &checkpointResp)
+				if err != nil {
+					log.Printf("Failed to unmarshal checkpoint response: %v", err)
+					continue
+				}
+
+				if checkpointResp.OwnershipChanged {
+					log.Printf("Ownership of shard %s changed, stopping processing", assignment.ShardID)
+					return
+				}
+
+				if checkpointResp.NotInService {
+					log.Printf("Manager not in service, stopping processing of shard %s", assignment.ShardID)
+					return
+				}
+
+				log.Printf("Successfully checkpointed shard %s at sequence number %s", assignment.ShardID, *lastRecord.SequenceNumber)
+			}
+
+		case <-w.stop:
+			log.Printf("Received stop signal, stopping processing of shard %s", assignment.ShardID)
+			return
 		}
 	}
 
