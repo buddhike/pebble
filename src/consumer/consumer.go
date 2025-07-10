@@ -107,46 +107,6 @@ func (cfg *ConsumerConfig) GetEtcdPeerName() string {
 	return fmt.Sprintf("%s-%d", cfg.Name, cfg.ManagerID)
 }
 
-type Consumer struct {
-	cfg       *ConsumerConfig
-	done      chan struct{}
-	processFn func(types.Record)
-	kvs       KVS
-	kds       aws.Kinesis
-}
-
-func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
-	config := &ConsumerConfig{
-		Name:                    name,
-		StreamName:              streamName,
-		EfoConsumerArn:          efoConsumerArn,
-		ProcessFn:               processFn,
-		ManagerID:               1,
-		EtcdListenPeerAddress:   "0.0.0.0",
-		EtcdListenClientAddress: "0.0.0.0",
-		ManagerListenAddress:    "0.0.0.0",
-		EtcdPeerUrls:            "http://0.0.0.0:11001",
-		EtcdClientUrls:          "http://0.0.0.0:12001",
-		ManagerUrls:             "http://0.0.0.0:13001",
-		LeadershipTtlSeconds:    60,
-	}
-
-	for _, opt := range opts {
-		opt(config)
-	}
-
-	return &Consumer{
-		cfg:       config,
-		done:      make(chan struct{}),
-		processFn: processFn,
-	}
-}
-
-func NewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
-	allOpts := append(opts, WithLeadershipTtlSeconds(5))
-	return NewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
-}
-
 func WithManagerListenAddress(addr string) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.ManagerListenAddress = addr
@@ -199,6 +159,46 @@ func WithManagerID(id int) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.ManagerID = id
 	}
+}
+
+type Consumer struct {
+	cfg       *ConsumerConfig
+	done      chan struct{}
+	processFn func(types.Record)
+	kvs       KVS
+	kds       aws.Kinesis
+}
+
+func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
+	config := &ConsumerConfig{
+		Name:                    name,
+		StreamName:              streamName,
+		EfoConsumerArn:          efoConsumerArn,
+		ProcessFn:               processFn,
+		ManagerID:               1,
+		EtcdListenPeerAddress:   "0.0.0.0",
+		EtcdListenClientAddress: "0.0.0.0",
+		ManagerListenAddress:    "0.0.0.0",
+		EtcdPeerUrls:            "http://0.0.0.0:11001",
+		EtcdClientUrls:          "http://0.0.0.0:12001",
+		ManagerUrls:             "http://0.0.0.0:13001",
+		LeadershipTtlSeconds:    60,
+	}
+
+	for _, opt := range opts {
+		opt(config)
+	}
+
+	return &Consumer{
+		cfg:       config,
+		done:      make(chan struct{}),
+		processFn: processFn,
+	}
+}
+
+func NewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
+	allOpts := append(opts, WithLeadershipTtlSeconds(5))
+	return NewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
 }
 
 func (c *Consumer) Start() error {
