@@ -15,18 +15,19 @@ import (
 )
 
 type ManagerService struct {
-	mut              *sync.Mutex
-	inService        bool
-	kds              aws.Kinesis
-	kvs              KVS
-	cfg              *ConsumerConfig
-	shards           []types.Shard
-	unassignedShards []types.Shard
-	assignmentData   map[string]*assignmentData
-	checkpoints      map[string]string
-	done             chan struct{}
-	stop             chan struct{}
-	workerHeartbeats map[string]time.Time
+	mut                *sync.Mutex
+	inService          bool
+	kds                aws.Kinesis
+	kvs                KVS
+	cfg                *ConsumerConfig
+	shards             []types.Shard
+	unassignedShards   []types.Shard
+	assignmentData     map[string]*assignmentData
+	checkpoints        map[string]string
+	done               chan struct{}
+	stop               chan struct{}
+	workerHeartbeats   map[string]time.Time
+	healthcheckTimeout time.Duration
 }
 
 type Status struct {
@@ -65,13 +66,14 @@ type AssignResponse struct {
 
 func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}) *ManagerService {
 	return &ManagerService{
-		cfg:              cfg,
-		mut:              &sync.Mutex{},
-		kds:              kds,
-		kvs:              kvs,
-		done:             make(chan struct{}),
-		stop:             stop,
-		workerHeartbeats: make(map[string]time.Time),
+		cfg:                cfg,
+		mut:                &sync.Mutex{},
+		kds:                kds,
+		kvs:                kvs,
+		done:               make(chan struct{}),
+		stop:               stop,
+		workerHeartbeats:   make(map[string]time.Time),
+		healthcheckTimeout: time.Second * time.Duration(cfg.HealthcheckTimeoutSeconds),
 	}
 }
 
@@ -84,6 +86,7 @@ func (m *ManagerService) Start() error {
 		http.HandleFunc("/checkpoint/", m.Checkpoint)
 		http.HandleFunc("/assign/", m.Assign)
 		http.HandleFunc("/status/", m.Status)
+		http.HandleFunc("/health/", m.Health)
 		http.ListenAndServe(fmt.Sprintf("%s:%s", url.Hostname(), url.Port()), nil)
 	}()
 	return nil
@@ -289,4 +292,18 @@ func (m *ManagerService) SetInService(inService bool) {
 			}
 		}
 	}
+}
+
+func (m *ManagerService) Health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), m.healthcheckTimeout)
+	_, err := m.kvs.Get(ctx, "/healthcheck")
+	cancel()
+	if err != nil {
+		fmt.Println("EtcdServer Healthcheck failed", err)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(fmt.Sprintf("unhealthy-%s-%d: %v", m.cfg.Name, m.cfg.ManagerID, err)))
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte(fmt.Sprintf("healthy-%s-%d", m.cfg.Name, m.cfg.ManagerID)))
 }

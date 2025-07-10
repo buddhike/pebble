@@ -15,19 +15,20 @@ import (
 )
 
 type ConsumerConfig struct {
-	StreamName              string
-	EfoConsumerArn          string
-	ProcessFn               func(types.Record)
-	Name                    string
-	ManagerID               int
-	KinesisClient           *kinesis.Client
-	ManagerUrls             string
-	EtcdPeerUrls            string
-	EtcdClientUrls          string
-	ManagerListenAddress    string
-	EtcdListenClientAddress string
-	EtcdListenPeerAddress   string
-	LeadershipTtlSeconds    int
+	StreamName                string
+	EfoConsumerArn            string
+	ProcessFn                 func(types.Record)
+	Name                      string
+	ManagerID                 int
+	KinesisClient             *kinesis.Client
+	ManagerUrls               string
+	EtcdPeerUrls              string
+	EtcdClientUrls            string
+	ManagerListenAddress      string
+	EtcdListenClientAddress   string
+	EtcdListenPeerAddress     string
+	LeadershipTtlSeconds      int
+	HealthcheckTimeoutSeconds int
 }
 
 func (cfg *ConsumerConfig) GetClientConnectionUrls() []string {
@@ -107,6 +108,10 @@ func (cfg *ConsumerConfig) GetEtcdPeerName() string {
 	return fmt.Sprintf("%s-%d", cfg.Name, cfg.ManagerID)
 }
 
+func (cfg *ConsumerConfig) GetCurrentNodeClientConnectionUrl() string {
+	return cfg.GetClientConnectionUrls()[cfg.ManagerID-1]
+}
+
 func WithManagerListenAddress(addr string) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.ManagerListenAddress = addr
@@ -161,6 +166,12 @@ func WithManagerID(id int) func(*ConsumerConfig) {
 	}
 }
 
+func WithHealthCheckTimeoutSeconds(timeout int) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.HealthcheckTimeoutSeconds = timeout
+	}
+}
+
 type Consumer struct {
 	cfg       *ConsumerConfig
 	done      chan struct{}
@@ -171,18 +182,19 @@ type Consumer struct {
 
 func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
 	config := &ConsumerConfig{
-		Name:                    name,
-		StreamName:              streamName,
-		EfoConsumerArn:          efoConsumerArn,
-		ProcessFn:               processFn,
-		ManagerID:               1,
-		EtcdListenPeerAddress:   "0.0.0.0",
-		EtcdListenClientAddress: "0.0.0.0",
-		ManagerListenAddress:    "0.0.0.0",
-		EtcdPeerUrls:            "http://0.0.0.0:11001",
-		EtcdClientUrls:          "http://0.0.0.0:12001",
-		ManagerUrls:             "http://0.0.0.0:13001",
-		LeadershipTtlSeconds:    60,
+		Name:                      name,
+		StreamName:                streamName,
+		EfoConsumerArn:            efoConsumerArn,
+		ProcessFn:                 processFn,
+		ManagerID:                 1,
+		EtcdListenPeerAddress:     "0.0.0.0",
+		EtcdListenClientAddress:   "0.0.0.0",
+		ManagerListenAddress:      "0.0.0.0",
+		EtcdPeerUrls:              "http://0.0.0.0:11001",
+		EtcdClientUrls:            "http://0.0.0.0:12001",
+		ManagerUrls:               "http://0.0.0.0:13001",
+		LeadershipTtlSeconds:      60,
+		HealthcheckTimeoutSeconds: 5,
 	}
 
 	for _, opt := range opts {
@@ -197,7 +209,7 @@ func NewConsumer(name, streamName, efoConsumerArn string, processFn func(types.R
 }
 
 func NewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
-	allOpts := append(opts, WithLeadershipTtlSeconds(5))
+	allOpts := append(opts, WithLeadershipTtlSeconds(5), WithHealthCheckTimeoutSeconds(1))
 	return NewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
 }
 

@@ -8,9 +8,10 @@ import (
 )
 
 type EtcdServer struct {
-	cfg  *ConsumerConfig
-	done chan struct{}
-	stop chan struct{}
+	cfg              *ConsumerConfig
+	done             chan struct{}
+	stop             chan struct{}
+	startStopTimeout time.Duration
 }
 
 func NewEtcdServer(cfg *ConsumerConfig, stop chan struct{}) *EtcdServer {
@@ -62,9 +63,8 @@ func (s *EtcdServer) Start() error {
 		select {
 		case <-e.Server.ReadyNotify():
 			fmt.Println("Embedded etcd server is ready!")
-		case <-time.After(60 * time.Second):
+		case <-time.After(s.startStopTimeout):
 			fmt.Println("Embedded etcd server took too long to start")
-			close(s.done)
 		}
 
 		<-s.stop
@@ -73,7 +73,7 @@ func (s *EtcdServer) Start() error {
 		select {
 		case <-e.Server.StopNotify():
 			fmt.Println("Embedded etcd server stopped")
-		case <-time.After(60 * time.Second):
+		case <-time.After(s.startStopTimeout):
 			fmt.Println("Embedded etcd server took too long to stop")
 		}
 		close(s.done)
