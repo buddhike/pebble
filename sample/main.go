@@ -26,10 +26,16 @@ func init() {
 func main() {
 	flag.Parse()
 
+	peerUrls := consumer.WithEtcdPeerUrls("http://localhost:11001,http://localhost:11002,http://localhost:11003")
+	clientUrls := consumer.WithEtcdClientUrls("http://localhost:12001,http://localhost:12002,http://localhost:12003")
+	managerUrls := consumer.WithManagerUrls("http://localhost:13001,http://localhost:13002,http://localhost:13003")
+	managerID := consumer.WithManagerID(managerID)
+
 	processFn := func(record types.Record) {
 		fmt.Printf("Processing record: %s\n", *record.PartitionKey)
 	}
-	c := consumer.NewDevelopmentConsumer("my-consumer", stream, streamConsumerArn, processFn, consumer.WithManagerID(managerID), consumer.WithManagerUrls("http://localhost:13001,http://localhost:13002,http://localhost:13003"), consumer.WithEtcdClientUrls("http://localhost:12001,http://localhost:12002,http://localhost:12003"), consumer.WithEtcdPeerUrls("http://localhost:11001,http://localhost:11002,http://localhost:11003"))
+
+	c := consumer.NewDevelopmentConsumer("my-consumer", stream, streamConsumerArn, processFn, managerID, managerUrls, clientUrls, peerUrls)
 
 	// Start the consumer
 	err := c.Start()
