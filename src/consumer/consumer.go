@@ -47,9 +47,13 @@ func MustNewConsumer(name, streamName, efoConsumerArn string, processFn func(typ
 		opt(config)
 	}
 
-	logger, err := zap.NewProduction()
-	if err != nil {
-		panic(err)
+	logger := config.logger
+	if logger == nil {
+		l, err := zap.NewProduction()
+		if err != nil {
+			panic(err)
+		}
+		logger = l
 	}
 
 	return &Consumer{
@@ -63,7 +67,11 @@ func MustNewConsumer(name, streamName, efoConsumerArn string, processFn func(typ
 }
 
 func MustNewDevelopmentConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
-	allOpts := append(opts, WithLeadershipTtlSeconds(5), WithHealthCheckTimeoutSeconds(1), WithEtcdStartTimeoutSeconds(10))
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		panic(err)
+	}
+	allOpts := append(opts, WithLeadershipTtlSeconds(5), WithHealthCheckTimeoutSeconds(1), WithEtcdStartTimeoutSeconds(10), WithLogger(logger))
 	return MustNewConsumer(name, streamName, efoConsumerArn, processFn, allOpts...)
 }
 

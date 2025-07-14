@@ -57,7 +57,6 @@ func (s *EtcdServer) Start() error {
 	cfg.ListenPeerUrls = listenPeerUrls
 	cfg.AdvertisePeerUrls = advertisePeerUrls
 	cfg.InitialCluster = s.cfg.GetInitialCluster()
-	cfg.LogFormat = "console"
 
 	go func() {
 		defer close(s.done)

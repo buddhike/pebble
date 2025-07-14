@@ -7,6 +7,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
+	"go.uber.org/zap"
 )
 
 type ConsumerConfig struct {
@@ -26,6 +27,7 @@ type ConsumerConfig struct {
 	LeadershipTtlSeconds      int
 	HealthcheckTimeoutSeconds int
 	EtcdStartTimeoutSeconds   int
+	logger                    *zap.Logger
 }
 
 func (cfg *ConsumerConfig) GetClientConnectionUrls() []string {
@@ -172,5 +174,11 @@ func WithHealthCheckTimeoutSeconds(timeout int) func(*ConsumerConfig) {
 func WithEtcdStartTimeoutSeconds(timeout int) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.EtcdStartTimeoutSeconds = timeout
+	}
+}
+
+func WithLogger(logger *zap.Logger) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.logger = logger
 	}
 }
