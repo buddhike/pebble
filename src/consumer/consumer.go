@@ -98,23 +98,25 @@ func (c *Consumer) Start() error {
 			c.kds = c.cfg.KinesisClient
 		}
 
-		etcdServer := NewEtcdServer(c.cfg, c.stop, c.logger)
-		err = etcdServer.Start()
-		if err != nil {
-			return err
-		}
-		c.componentsDoneNotify["EtcdServer"] = etcdServer.done
+		if c.cfg.ManagerID != 0 {
+			mgr := NewManagerService(c.cfg, c.kds, c.kvs, c.stop, c.logger)
+			err = mgr.Start()
+			if err != nil {
+				return err
+			}
+			c.componentsDoneNotify["ManagerService"] = mgr.done
 
-		mgr := NewManagerService(c.cfg, c.kds, c.kvs, c.stop, c.logger)
-		err = mgr.Start()
-		if err != nil {
-			return err
-		}
-		c.componentsDoneNotify["ManagerService"] = mgr.done
+			etcdServer := NewEtcdServer(c.cfg, c.stop, c.logger)
+			err = etcdServer.Start()
+			if err != nil {
+				return err
+			}
+			c.componentsDoneNotify["EtcdServer"] = etcdServer.done
 
-		leader := NewLeader(c.cfg, mgr, cli, c.stop, c.logger)
-		c.componentsDoneNotify["Leader"] = leader.done
-		leader.Start()
+			leader := NewLeader(c.cfg, mgr, cli, c.stop, c.logger)
+			c.componentsDoneNotify["Leader"] = leader.done
+			leader.Start()
+		}
 
 		worker := NewWorker(c.cfg, c.kds, c.stop, c.logger)
 		c.componentsDoneNotify["Worker"] = worker.done

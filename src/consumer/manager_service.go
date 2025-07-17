@@ -122,6 +122,23 @@ type AssignResponse struct {
 	Assignments []Assignment
 }
 
+type ShardState struct {
+	ShardID       string
+	WorkerID      string
+	LastHeartbeat *time.Time
+}
+
+type WorkerState struct {
+	WorkerID               string
+	NumberOfAssignedShards int
+}
+
+type StateResponse struct {
+	Status
+	Shards  []ShardState
+	Workers []WorkerState
+}
+
 func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}, logger *zap.Logger) *ManagerService {
 	return &ManagerService{
 		cfg:                cfg,
@@ -153,6 +170,7 @@ func (m *ManagerService) Start() error {
 		http.HandleFunc("/assign/", m.Assign)
 		http.HandleFunc("/status/", m.Status)
 		http.HandleFunc("/health/", m.Health)
+		http.HandleFunc("/state/", m.State)
 		server.ListenAndServe()
 		close(m.done)
 	}()
@@ -432,4 +450,50 @@ func (m *ManagerService) Health(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(fmt.Sprintf("healthy-%s-%d", m.cfg.Name, m.cfg.ManagerID)))
+}
+
+func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+
+	if !m.ensureInService(w) {
+		return
+	}
+
+	shards := make([]ShardState, 0)
+	for _, s := range m.shards {
+		var wd *workerData
+		for _, v := range m.workers {
+			if v.assignedShards[*s.ShardId] != nil {
+				wd = v
+				break
+			}
+		}
+		var workerID string
+		var lhb *time.Time
+		if wd != nil {
+			workerID = wd.workerID
+			lhb = &wd.lastHeartbeat
+		}
+		shards = append(shards, ShardState{ShardID: *s.ShardId, WorkerID: workerID, LastHeartbeat: lhb})
+	}
+
+	workers := make([]WorkerState, 0)
+	for k, w := range m.workers {
+		workers = append(workers, WorkerState{WorkerID: k, NumberOfAssignedShards: len(w.assignedShards)})
+	}
+
+	res := &StateResponse{
+		Shards:  shards,
+		Workers: workers,
+	}
+
+	buf, err := json.Marshal(res)
+	if err != nil {
+		m.logger.Error("error when marshaling state response", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(buf)
 }

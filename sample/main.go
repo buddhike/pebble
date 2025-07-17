@@ -20,7 +20,7 @@ var (
 func init() {
 	flag.StringVar(&stream, "stream", "", "Name of KDS stream")
 	flag.StringVar(&streamConsumerArn, "stream-consumer-arn", "", "EFO consumer ARN")
-	flag.IntVar(&managerID, "manager-id", 1, "Manager ID for clustering")
+	flag.IntVar(&managerID, "manager-id", 0, "Manager ID for clustering")
 }
 
 func main() {
