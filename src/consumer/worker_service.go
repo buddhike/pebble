@@ -139,8 +139,6 @@ func (w *WorkerService) Start() {
 						go w.processShard(assignment, done)
 					}
 					w.maxShards = w.maxShards * 2
-				} else {
-					w.logger.Info("no shards assigned")
 				}
 
 				// Wait before next request with stop signal handling

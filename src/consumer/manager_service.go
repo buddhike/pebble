@@ -291,9 +291,6 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		for _, s := range m.unassignedShards[0:count] {
 			worker.assignedShards[*s.ShardId] = s
 			sn := m.checkpoints[*s.ShardId]
-			if sn == "" {
-				sn = "LATEST"
-			}
 			assignments = append(assignments, Assignment{ShardID: *s.ShardId, SequenceNumber: sn})
 		}
 		m.unassignedShards = m.unassignedShards[count:]
@@ -333,41 +330,54 @@ func (m *ManagerService) ensureInService(w http.ResponseWriter) bool {
 }
 
 func (m *ManagerService) SetInService(inService bool) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-	m.inService = inService
+	if !inService {
+		m.mut.Lock()
+		m.inService = inService
+		m.mut.Unlock()
+		return
+	}
 
-	if m.inService {
-		if m.shards == nil {
-			input := &kinesis.ListShardsInput{
-				StreamName: &m.cfg.StreamName,
-			}
-			out, err := m.kds.ListShards(context.Background(), input)
-			if err != nil {
-				m.logger.Error("failed to list shards", zap.Error(err))
-				panic(err)
-			}
-			m.shards = out.Shards
-		}
-		for _, s := range m.shards {
-			m.unassignedShards = append(m.unassignedShards, &s)
-		}
-		m.workers = make(map[string]*workerData)
-		m.checkpoints = make(map[string]string)
+	// Prepare everything we need before we acquire the lock to update inService
+	// status. This will prevent other API calls trying to acquire the same lock
+	// getting blocked until shards are discovered.
+	// We aim to not perform any long running IO operations while holding the
+	// global state mut.
+	input := &kinesis.ListShardsInput{
+		StreamName: &m.cfg.StreamName,
+	}
+	// AWS SDK client has built-in retry logic
+	out, err := m.kds.ListShards(context.Background(), input)
+	if err != nil {
+		m.logger.Error("failed to list shards", zap.Error(err))
+		// TODO: Instead of panicing here, return the error to caller
+		// Caller can release leadership
+		panic(err)
+	}
+	m.shards = out.Shards
+	m.workers = make(map[string]*workerData)
+	m.checkpoints = make(map[string]string)
+	m.workerHeartbeats = primitives.NewPriorityQueue[string](false)
 
-		for _, s := range m.unassignedShards {
-			cp, err := m.kvs.Get(context.Background(), *s.ShardId)
-			if err != nil {
-				m.logger.Error("failed to get checkpoint from kvs", zap.Error(err))
-				panic(err)
-			}
-			if cp.Count > 0 {
-				m.checkpoints[*s.ShardId] = string(cp.Kvs[0].Value)
-			} else {
-				m.checkpoints[*s.ShardId] = "LATEST"
-			}
+	for _, s := range m.shards {
+		m.unassignedShards = append(m.unassignedShards, &s)
+	}
+	for _, s := range m.unassignedShards {
+		// ETCD client v3 has built-in retry logic
+		cp, err := m.kvs.Get(context.Background(), *s.ShardId)
+		if err != nil {
+			m.logger.Error("failed to get checkpoint from kvs", zap.Error(err))
+			panic(err)
+		}
+		if cp.Count > 0 {
+			m.checkpoints[*s.ShardId] = string(cp.Kvs[0].Value)
+		} else {
+			m.checkpoints[*s.ShardId] = "LATEST"
 		}
 	}
+
+	m.mut.Lock()
+	m.inService = true
+	m.mut.Unlock()
 }
 
 func (m *ManagerService) Health(w http.ResponseWriter, r *http.Request) {
