@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -482,6 +483,26 @@ func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
 	for k, w := range m.workers {
 		workers = append(workers, WorkerState{WorkerID: k, NumberOfAssignedShards: len(w.assignedShards)})
 	}
+
+	slices.SortFunc(shards, func(a, b ShardState) int {
+		if a.ShardID < b.ShardID {
+			return -1
+		}
+		if a.ShardID > b.ShardID {
+			return 1
+		}
+		return 0
+	})
+
+	slices.SortFunc(workers, func(a, b WorkerState) int {
+		if a.WorkerID < b.WorkerID {
+			return -1
+		}
+		if a.WorkerID > b.WorkerID {
+			return 1
+		}
+		return 0
+	})
 
 	res := &StateResponse{
 		Shards:  shards,
