@@ -62,9 +62,6 @@ import (
 // Used to find out the worker with most number of shards assigned
 // They are prioritised when stealing work
 //
-// StolenShards
-// Heap storing all shards stolen for load shedding. Oldest shard appears on top
-//
 
 type ManagerService struct {
 	mut                *sync.Mutex
