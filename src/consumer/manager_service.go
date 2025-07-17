@@ -323,15 +323,13 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var assignments []Assignment
-	if len(m.unassignedShards) >= request.MaxShards {
-		count := min(request.MaxShards, len(m.unassignedShards))
-		for _, s := range m.unassignedShards[0:count] {
-			worker.assignedShards[*s.ShardId] = &shardState{shard: s}
-			sn := m.checkpoints[*s.ShardId]
-			assignments = append(assignments, Assignment{ShardID: *s.ShardId, SequenceNumber: sn})
-		}
-		m.unassignedShards = m.unassignedShards[count:]
+	count := min(request.MaxShards, len(m.unassignedShards))
+	for _, s := range m.unassignedShards[0:count] {
+		worker.assignedShards[*s.ShardId] = &shardState{shard: s}
+		sn := m.checkpoints[*s.ShardId]
+		assignments = append(assignments, Assignment{ShardID: *s.ShardId, SequenceNumber: sn})
 	}
+	m.unassignedShards = m.unassignedShards[count:]
 
 	if len(worker.assignedShards) > 0 {
 		m.workerShardCount.Push(request.WorkerID, float64(len(worker.assignedShards)))
