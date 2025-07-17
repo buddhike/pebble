@@ -91,7 +91,12 @@ type Status struct {
 type workerData struct {
 	workerID       string
 	lastHeartbeat  time.Time
-	assignedShards map[string]*types.Shard
+	assignedShards map[string]*shardState
+}
+
+type shardState struct {
+	shard            *types.Shard
+	releaseRequested bool
 }
 
 type Assignment struct {
@@ -210,6 +215,20 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	// Worker owns the shard, update checkpoint
 	m.checkpoints[request.ShardID] = request.SequenceNumber
 
+	// Release the shard is it has been requested
+	assignment := worker.assignedShards[request.ShardID]
+	if assignment.releaseRequested {
+		delete(worker.assignedShards, request.ShardID)
+		m.unassignedShards = append(m.unassignedShards, assignment.shard)
+		response := CheckpointResponse{
+			OwnershipChanged: true,
+		}
+		res, _ := json.Marshal(response)
+		w.WriteHeader(http.StatusOK)
+		w.Write(res)
+		return
+	}
+
 	response := CheckpointResponse{
 		Status:           Status{NotInService: false},
 		OwnershipChanged: false,
@@ -252,7 +271,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	if worker == nil {
 		worker = &workerData{
 			workerID:       request.WorkerID,
-			assignedShards: make(map[string]*types.Shard),
+			assignedShards: make(map[string]*shardState),
 		}
 		m.workers[request.WorkerID] = worker
 	}
@@ -282,23 +301,42 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		}
 		m.workerHeartbeats.Pop()
 		for _, a := range m.workers[leastActiveWorkerID].assignedShards {
-			m.unassignedShards = append(m.unassignedShards, a)
+			m.unassignedShards = append(m.unassignedShards, a.shard)
 		}
-		leastActiveWorker.assignedShards = make(map[string]*types.Shard)
+		leastActiveWorker.assignedShards = make(map[string]*shardState)
 	}
 
 	var assignments []Assignment
 	if len(m.unassignedShards) >= request.MaxShards {
 		count := min(request.MaxShards, len(m.unassignedShards))
 		for _, s := range m.unassignedShards[0:count] {
-			worker.assignedShards[*s.ShardId] = s
+			worker.assignedShards[*s.ShardId] = &shardState{shard: s}
 			sn := m.checkpoints[*s.ShardId]
 			assignments = append(assignments, Assignment{ShardID: *s.ShardId, SequenceNumber: sn})
 		}
 		m.unassignedShards = m.unassignedShards[count:]
 	}
 
-	m.workerShardCount.Push(request.WorkerID, float64(len(worker.assignedShards)))
+	if len(worker.assignedShards) > 0 {
+		m.workerShardCount.Push(request.WorkerID, float64(len(worker.assignedShards)))
+	} else {
+		// Mark shards for stealing
+		// How many to steal?
+		idealCountPerWorker := len(m.shards) / len(m.workers)
+		count := min(request.MaxShards, idealCountPerWorker)
+		for range count {
+			wid, _ := m.workerShardCount.Peek()
+			w := m.workers[wid]
+			if w == nil || len(w.assignedShards) == 1 {
+				break
+			}
+			for _, v := range w.assignedShards {
+				v.releaseRequested = true
+				break
+			}
+			m.workerShardCount.Push(wid, float64(len(w.assignedShards)-1))
+		}
+	}
 
 	response := AssignResponse{
 		Assignments: assignments,
