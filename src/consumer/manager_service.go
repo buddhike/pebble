@@ -347,8 +347,10 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			for _, v := range w.assignedShards {
-				v.releaseRequested = true
-				break
+				if !v.releaseRequested {
+					v.releaseRequested = true
+					break
+				}
 			}
 			m.workerShardCount.Push(wid, float64(len(w.assignedShards)-1))
 		}
