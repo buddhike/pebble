@@ -51,7 +51,6 @@ func (s *EtcdServer) Start() error {
 	cfg.Name = s.cfg.GetEtcdPeerName()
 	cfg.Dir = fmt.Sprintf("%s.etcd", cfg.Name)
 	cfg.Logger = "zap"
-	cfg.LogOutputs = []string{}
 	cfg.ListenClientUrls = listenClientUrls
 	cfg.AdvertiseClientUrls = advertiseClientUrls
 	cfg.ListenPeerUrls = listenPeerUrls

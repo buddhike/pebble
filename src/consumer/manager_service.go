@@ -15,6 +15,56 @@ import (
 	"go.uber.org/zap"
 )
 
+// ManagerService implements the logic for assigning shards to workers.
+// Work assignment protocol
+// Workers invoke assign method periodically
+// Manager maintains a list of unassigned shards and assigns one or more shards
+// to the worker
+// Manager keeps track of the number of shards assigned to the worker during
+// its last assignment
+//
+// Number of shards a manager assigns to a given worker grows exponentially by
+// assigning twice as many as shards than what's assigned during the last iteration
+// Workers add a smaller jitter to the frequency of Assign calls to randomise the
+// concurrent calls made by multiple workers
+// Jitter should be configurable and the default value should be 100ms
+// For example, if the frequency of Assign heartbeat is set to 100ms and jitter is also
+// 100ms, Assign call should happen sometime between 100-200ms since the last call
+//
+// When there are no available shards to assign, manager uses assign invocation as an opportutnity
+// to ensure that shards are assigned evenly across all available workers
+// It first calculates what's the distribution should be and works out the ideal number of shards
+// that should have been assigned to the worker invoking assign call
+// It then performs the stealing logic as described below
+//
+// manager first checks to see if all workers are heartbeating as expected via assign call
+// If there are shards assigned to inactive workers, they are reassigned first
+// When there are no available shards to assign, manager attempts to balance the
+// distribution by stealing shards from existing workers
+//
+// Shard stealing is two phase. In phase 1, manager marks some shards for releasing.
+// Next time when the worker attempts to checkpoint, manager records the checkpoint
+// then notify the worker that it no logner owns the shard
+// The shard is then added to the list of unassigned shards
+// Each shard that is stolen maintains the original worker id and excludes it
+// from getting re-assigned to the same worker
+// Each stolen shard also has a TTL associated. If they are not assigned before
+// TTL is expired, they become available for assignement for any worker
+//
+// Internal State Management Data Structures
+// WorkerHeartBeats
+// Heap storing oldest worker heartbeat in the root
+// Used to find out the worker with oldest heartbeat
+//
+// WorkerLoad
+// Priority queue where the worker with most number of shards assigned is on top
+// Used to find out the worker with most number of shards assigned
+// They are prioritised when stealing work
+//
+// StolenShards
+// Heap storing all shards stolen for load shedding. Oldest shard appears on top
+//
+
 type ManagerService struct {
 	mut                *sync.Mutex
 	inService          bool
