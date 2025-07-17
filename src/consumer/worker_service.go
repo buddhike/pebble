@@ -26,6 +26,7 @@ type WorkerService struct {
 	managerUrls  []string
 	managerIndex int
 	logger       *zap.Logger
+	maxShards    int
 }
 
 func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}, logger *zap.Logger) *WorkerService {
@@ -37,6 +38,7 @@ func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}, logger 
 		stop:        stop,
 		managerUrls: strings.Split(cfg.ManagerUrls, ","),
 		logger:      logger.Named(fmt.Sprintf("Worker-%s", id)),
+		maxShards:   1,
 	}
 }
 
@@ -49,6 +51,7 @@ func (w *WorkerService) rotateManager() {
 	if w.managerIndex == len(w.managerUrls) {
 		w.managerIndex = 0
 	}
+	w.maxShards = 1
 }
 
 func (w *WorkerService) Start() {
@@ -64,7 +67,8 @@ func (w *WorkerService) Start() {
 			default:
 				// Create assign request
 				assignReq := AssignRequest{
-					WorkerID: w.cfg.ID,
+					WorkerID:  w.cfg.ID,
+					MaxShards: w.maxShards,
 				}
 
 				// Marshal request to JSON
@@ -134,6 +138,7 @@ func (w *WorkerService) Start() {
 						done := make(chan struct{})
 						go w.processShard(assignment, done)
 					}
+					w.maxShards = w.maxShards * 2
 				} else {
 					w.logger.Info("no shards assigned")
 				}

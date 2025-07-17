@@ -6,7 +6,7 @@ import (
 
 type item[T any] struct {
 	value    T
-	priority float32
+	priority float64
 	index    int
 }
 
@@ -63,7 +63,7 @@ func NewPriorityQueue[T comparable](reversed bool) *PriorityQueue[T] {
 	}
 }
 
-func (q *PriorityQueue[T]) Push(v T, priority float32) {
+func (q *PriorityQueue[T]) Push(v T, priority float64) {
 	i := q.idx[v]
 	if i == nil {
 		i = &item[T]{

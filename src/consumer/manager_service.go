@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
+	"github.com/buddhike/pebble/primitives"
 	"go.uber.org/zap"
 )
 
@@ -72,12 +73,12 @@ type ManagerService struct {
 	kvs                KVS
 	cfg                *ConsumerConfig
 	shards             []types.Shard
-	unassignedShards   []types.Shard
-	assignmentData     map[string]*assignmentData
+	unassignedShards   []*types.Shard
 	checkpoints        map[string]string
 	done               chan struct{}
 	stop               chan struct{}
-	workerHeartbeats   map[string]time.Time
+	workers            map[string]*workerData
+	workerHeartbeats   *primitives.PriorityQueue[string]
 	healthcheckTimeout time.Duration
 	logger             *zap.Logger
 }
@@ -86,9 +87,10 @@ type Status struct {
 	NotInService bool
 }
 
-type assignmentData struct {
-	shards              map[string]types.Shard
-	lastAssignmentCount int
+type workerData struct {
+	workerID       string
+	lastHeartbeat  time.Time
+	assignedShards map[string]*types.Shard
 }
 
 type Assignment struct {
@@ -108,7 +110,8 @@ type CheckpointResponse struct {
 }
 
 type AssignRequest struct {
-	WorkerID string
+	WorkerID  string
+	MaxShards int
 }
 
 type AssignResponse struct {
@@ -124,7 +127,8 @@ func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan 
 		kvs:                kvs,
 		done:               make(chan struct{}),
 		stop:               stop,
-		workerHeartbeats:   make(map[string]time.Time),
+		workers:            make(map[string]*workerData),
+		workerHeartbeats:   primitives.NewPriorityQueue[string](false),
 		healthcheckTimeout: time.Second * time.Duration(cfg.HealthcheckTimeoutSeconds),
 		logger:             logger.Named("managerservice").With(zap.Int("managerid", cfg.ManagerID)),
 	}
@@ -168,6 +172,7 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		m.logger.Error("error reading checkpoint request body", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -175,30 +180,15 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	var request CheckpointRequest
 	err = json.Unmarshal(body, &request)
 	if err != nil {
+		m.logger.Error("error unmashaling checkpoint request", zap.Error(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	// Check if worker owns the shard
-	ad, exists := m.assignmentData[request.WorkerID]
-	if !exists || ad == nil {
+	worker := m.workers[request.WorkerID]
+	if worker == nil || worker.assignedShards[request.ShardID] == nil {
 		// Worker doesn't exist, ownership changed
 		response := CheckpointResponse{
-			Status:           Status{NotInService: false},
-			OwnershipChanged: true,
-		}
-		res, _ := json.Marshal(response)
-		w.WriteHeader(http.StatusOK)
-		w.Write(res)
-		return
-	}
-
-	// Check if worker owns this specific shard
-	_, ownsShard := ad.shards[request.ShardID]
-	if !ownsShard {
-		// Worker doesn't own this shard, ownership changed
-		response := CheckpointResponse{
-			Status:           Status{NotInService: false},
 			OwnershipChanged: true,
 		}
 		res, _ := json.Marshal(response)
@@ -210,6 +200,7 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	// Store checkpoint in KVS
 	_, err = m.kvs.Put(context.Background(), request.ShardID, request.SequenceNumber)
 	if err != nil {
+		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -223,6 +214,7 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	res, err := json.Marshal(response)
 	if err != nil {
+		m.logger.Error("error marshaling checkpoint response", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -241,6 +233,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
+		m.logger.Error("error reading assign request body", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -248,50 +241,63 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	var request AssignRequest
 	err = json.Unmarshal(body, &request)
 	if err != nil {
+		m.logger.Error("error unmarshaling assign request", zap.Error(err))
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	m.workerHeartbeats[request.WorkerID] = time.Now()
-
-	var remove []string
-	for k, v := range m.assignmentData {
-		timeSinceLastHeartbeat := time.Since(m.workerHeartbeats[request.WorkerID])
-		if timeSinceLastHeartbeat > time.Second*5 {
-			remove = append(remove, k)
-			for _, v := range v.shards {
-				m.unassignedShards = append(m.unassignedShards, v)
-			}
+	worker := m.workers[request.WorkerID]
+	if worker == nil {
+		worker = &workerData{
+			workerID:       request.WorkerID,
+			assignedShards: make(map[string]*types.Shard),
 		}
-		delete(m.workerHeartbeats, k)
+		m.workers[request.WorkerID] = worker
 	}
-	for _, k := range remove {
-		delete(m.assignmentData, k)
+	worker.lastHeartbeat = time.Now()
+	m.workerHeartbeats.Push(request.WorkerID, float64(worker.lastHeartbeat.UnixMilli()))
+
+	if request.MaxShards == 0 {
+		response := AssignResponse{}
+
+		res, err := json.Marshal(response)
+		if err != nil {
+			m.logger.Error("error marshaling assign response", zap.Error(err))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Write(res)
+		return
 	}
 
-	var ad *assignmentData
+	// Ensure that shards assigned to inactive workers are made available
+	// for assignment
+	for {
+		leastActiveWorkerID, _ := m.workerHeartbeats.Peek()
+		leastActiveWorker := m.workers[leastActiveWorkerID]
+		if time.Since(leastActiveWorker.lastHeartbeat) < time.Second*5 {
+			break
+		}
+		m.workerHeartbeats.Pop()
+		for _, a := range m.workers[leastActiveWorkerID].assignedShards {
+			m.unassignedShards = append(m.unassignedShards, a)
+		}
+		leastActiveWorker.assignedShards = make(map[string]*types.Shard)
+	}
+
 	var assignments []Assignment
-	ad = m.assignmentData[request.WorkerID]
-	if ad == nil {
-		ad = &assignmentData{
-			shards: make(map[string]types.Shard),
+	if len(m.unassignedShards) >= request.MaxShards {
+		count := min(request.MaxShards, len(m.unassignedShards))
+		for _, s := range m.unassignedShards[0:count] {
+			worker.assignedShards[*s.ShardId] = s
+			sn := m.checkpoints[*s.ShardId]
+			if sn == "" {
+				sn = "LATEST"
+			}
+			assignments = append(assignments, Assignment{ShardID: *s.ShardId, SequenceNumber: sn})
 		}
-		m.assignmentData[request.WorkerID] = ad
+		m.unassignedShards = m.unassignedShards[count:]
 	}
-
-	numberOfShardsToAssign := 1
-	if ad.lastAssignmentCount > 0 {
-		numberOfShardsToAssign = ad.lastAssignmentCount * 2
-	}
-	numberOfShardsToAssign = min(len(m.unassignedShards), numberOfShardsToAssign)
-	for _, s := range m.unassignedShards[:numberOfShardsToAssign] {
-		assignments = append(assignments, Assignment{
-			ShardID:        *s.ShardId,
-			SequenceNumber: m.checkpoints[*s.ShardId],
-		})
-		ad.shards[*s.ShardId] = s
-	}
-	m.unassignedShards = m.unassignedShards[numberOfShardsToAssign:]
 
 	response := AssignResponse{
 		Assignments: assignments,
@@ -299,6 +305,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 
 	res, err := json.Marshal(response)
 	if err != nil {
+		m.logger.Error("error marshaling assign response", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -342,8 +349,10 @@ func (m *ManagerService) SetInService(inService bool) {
 			}
 			m.shards = out.Shards
 		}
-		m.unassignedShards = m.shards
-		m.assignmentData = make(map[string]*assignmentData)
+		for _, s := range m.shards {
+			m.unassignedShards = append(m.unassignedShards, &s)
+		}
+		m.workers = make(map[string]*workerData)
 		m.checkpoints = make(map[string]string)
 
 		for _, s := range m.unassignedShards {
