@@ -79,6 +79,7 @@ type ManagerService struct {
 	stop               chan struct{}
 	workers            map[string]*workerData
 	workerHeartbeats   *primitives.PriorityQueue[string]
+	workerShardCount   *primitives.PriorityQueue[string]
 	healthcheckTimeout time.Duration
 	logger             *zap.Logger
 }
@@ -129,6 +130,7 @@ func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan 
 		stop:               stop,
 		workers:            make(map[string]*workerData),
 		workerHeartbeats:   primitives.NewPriorityQueue[string](false),
+		workerShardCount:   primitives.NewPriorityQueue[string](true),
 		healthcheckTimeout: time.Second * time.Duration(cfg.HealthcheckTimeoutSeconds),
 		logger:             logger.Named("managerservice").With(zap.Int("managerid", cfg.ManagerID)),
 	}
@@ -296,6 +298,8 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		m.unassignedShards = m.unassignedShards[count:]
 	}
 
+	m.workerShardCount.Push(request.WorkerID, float64(len(worker.assignedShards)))
+
 	response := AssignResponse{
 		Assignments: assignments,
 	}
@@ -357,6 +361,7 @@ func (m *ManagerService) SetInService(inService bool) {
 	m.workers = make(map[string]*workerData)
 	m.checkpoints = make(map[string]string)
 	m.workerHeartbeats = primitives.NewPriorityQueue[string](false)
+	m.workerShardCount = primitives.NewPriorityQueue[string](true)
 
 	for _, s := range m.shards {
 		m.unassignedShards = append(m.unassignedShards, &s)
