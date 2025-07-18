@@ -92,3 +92,13 @@ func (q *PriorityQueue[T]) Peek() (T, bool) {
 	}
 	return items[0].value, true
 }
+
+func (q *PriorityQueue[T]) Remove(v T) bool {
+	i := q.idx[v]
+	if i == nil {
+		return false
+	}
+	delete(q.idx, v)
+	heap.Remove(q.pq, i.index)
+	return true
+}
