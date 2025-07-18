@@ -159,52 +159,67 @@ func (w *WorkerService) Start() {
 
 func (w *WorkerService) processShard(assignment Assignment, done chan struct{}) {
 	defer close(done)
-	// Determine starting position for subscription
-	var startingPosition types.StartingPosition
-	if assignment.SequenceNumber == "LATEST" {
-		startingPosition = types.StartingPosition{
-			Type: types.ShardIteratorTypeLatest,
+	sequenceNumber := ""
+	okToSubscribe := true
+
+	for okToSubscribe {
+		// Determine starting position for subscription
+		var startingPosition types.StartingPosition
+		if sequenceNumber != "" {
+			startingPosition = types.StartingPosition{
+				Type:           types.ShardIteratorTypeAtSequenceNumber,
+				SequenceNumber: &sequenceNumber,
+			}
+		} else if assignment.SequenceNumber == "LATEST" {
+			startingPosition = types.StartingPosition{
+				Type: types.ShardIteratorTypeLatest,
+			}
+		} else {
+			startingPosition = types.StartingPosition{
+				Type:           types.ShardIteratorTypeAtSequenceNumber,
+				SequenceNumber: &assignment.SequenceNumber,
+			}
 		}
-	} else {
-		startingPosition = types.StartingPosition{
-			Type:           types.ShardIteratorTypeAtSequenceNumber,
-			SequenceNumber: &assignment.SequenceNumber,
+
+		// Create subscription input
+		subscribeInput := &kinesis.SubscribeToShardInput{
+			ConsumerARN:      &w.cfg.EfoConsumerArn,
+			ShardId:          &assignment.ShardID,
+			StartingPosition: &startingPosition,
 		}
-	}
 
-	// Create subscription input
-	subscribeInput := &kinesis.SubscribeToShardInput{
-		ConsumerARN:      &w.cfg.EfoConsumerArn,
-		ShardId:          &assignment.ShardID,
-		StartingPosition: &startingPosition,
-	}
+		// Subscribe to shard
+		output, err := w.kds.SubscribeToShard(context.Background(), subscribeInput)
+		if err != nil {
+			w.logger.Info("failed to subscribe to shard", zap.String("shard-id", assignment.ShardID), zap.Error(err))
+			return
+		}
 
-	// Subscribe to shard
-	output, err := w.kds.SubscribeToShard(context.Background(), subscribeInput)
-	if err != nil {
-		w.logger.Info("failed to subscribe to shard", zap.String("shard-id", assignment.ShardID), zap.Error(err))
-		return
+		// Process events from the subscription with stop signal handling
+		okToSubscribe, sequenceNumber = w.handleSubscription(output, assignment)
 	}
+}
 
-	// Process events from the subscription with stop signal handling
+func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutput, assignment Assignment) (bool, string) {
 	eventStream := output.GetStream().Events()
+	sn := ""
 	for {
 		select {
 		case event, ok := <-eventStream:
 			if !ok {
 				log.Printf("Event stream closed for shard %s", assignment.ShardID)
-				return
+				return true, sn // ok to resubscribe
 			}
 
 			if event == nil {
 				log.Printf("Error in shard subscription %s", assignment.ShardID)
-				return
+				return false, ""
 			}
 
 			evt := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent)
 			if evt == nil {
 				log.Printf("Unexpected event type")
-				return
+				return false, ""
 			}
 
 			// Process records
@@ -249,21 +264,21 @@ func (w *WorkerService) processShard(assignment Assignment, done chan struct{}) 
 
 				if checkpointResp.OwnershipChanged {
 					w.logger.Info("ownership changed", zap.String("ShardID", assignment.ShardID))
-					return
+					return false, sn
 				}
 
 				if checkpointResp.NotInService {
 					w.logger.Info("manager not in service, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
-					return
+					return false, sn
 				}
 
+				sn = *lastRecord.SequenceNumber
 				w.logger.Info("successfully checkpointed shard", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", *lastRecord.SequenceNumber))
 			}
 
 		case <-w.stop:
 			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
-			return
+			return false, ""
 		}
 	}
-
 }
