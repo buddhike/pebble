@@ -184,81 +184,6 @@ func (m *ManagerService) Start() error {
 	return nil
 }
 
-func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-	defer r.Body.Close()
-
-	if !m.ensureInService(w) {
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		m.logger.Error("error reading checkpoint request body", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	var request CheckpointRequest
-	err = json.Unmarshal(body, &request)
-	if err != nil {
-		m.logger.Error("error unmashaling checkpoint request", zap.Error(err))
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	worker := m.workers[request.WorkerID]
-	if worker == nil || worker.assignedShards[request.ShardID] == nil {
-		// Worker doesn't exist, ownership changed
-		response := CheckpointResponse{
-			OwnershipChanged: true,
-		}
-		res, _ := json.Marshal(response)
-		w.WriteHeader(http.StatusOK)
-		w.Write(res)
-		return
-	}
-
-	// Store checkpoint in KVS
-	_, err = m.kvs.Put(context.Background(), request.ShardID, request.SequenceNumber)
-	if err != nil {
-		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	// Worker owns the shard, update checkpoint
-	m.checkpoints[request.ShardID] = request.SequenceNumber
-
-	// Release the shard is it has been requested
-	assignment := worker.assignedShards[request.ShardID]
-	if assignment.releaseRequested {
-		delete(worker.assignedShards, request.ShardID)
-		m.unassignedShards = append(m.unassignedShards, assignment.shard)
-		response := CheckpointResponse{
-			OwnershipChanged: true,
-		}
-		res, _ := json.Marshal(response)
-		w.WriteHeader(http.StatusOK)
-		w.Write(res)
-		return
-	}
-
-	response := CheckpointResponse{
-		Status:           Status{NotInService: false},
-		OwnershipChanged: false,
-	}
-	res, err := json.Marshal(response)
-	if err != nil {
-		m.logger.Error("error marshaling checkpoint response", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(res)
-}
-
 func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	m.mut.Lock()
 	defer m.mut.Unlock()
@@ -365,6 +290,81 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusOK)
+	w.Write(res)
+}
+
+func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	defer r.Body.Close()
+
+	if !m.ensureInService(w) {
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		m.logger.Error("error reading checkpoint request body", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	var request CheckpointRequest
+	err = json.Unmarshal(body, &request)
+	if err != nil {
+		m.logger.Error("error unmashaling checkpoint request", zap.Error(err))
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	worker := m.workers[request.WorkerID]
+	if worker == nil || worker.assignedShards[request.ShardID] == nil {
+		// Worker doesn't exist, ownership changed
+		response := CheckpointResponse{
+			OwnershipChanged: true,
+		}
+		res, _ := json.Marshal(response)
+		w.WriteHeader(http.StatusOK)
+		w.Write(res)
+		return
+	}
+
+	// Store checkpoint in KVS
+	_, err = m.kvs.Put(context.Background(), request.ShardID, request.SequenceNumber)
+	if err != nil {
+		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// Worker owns the shard, update checkpoint
+	m.checkpoints[request.ShardID] = request.SequenceNumber
+
+	// Release the shard is it has been requested
+	assignment := worker.assignedShards[request.ShardID]
+	if assignment.releaseRequested {
+		delete(worker.assignedShards, request.ShardID)
+		m.unassignedShards = append(m.unassignedShards, assignment.shard)
+		response := CheckpointResponse{
+			OwnershipChanged: true,
+		}
+		res, _ := json.Marshal(response)
+		w.WriteHeader(http.StatusOK)
+		w.Write(res)
+		return
+	}
+
+	response := CheckpointResponse{
+		Status:           Status{NotInService: false},
+		OwnershipChanged: false,
+	}
+	res, err := json.Marshal(response)
+	if err != nil {
+		m.logger.Error("error marshaling checkpoint response", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write(res)
 }
