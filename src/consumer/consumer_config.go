@@ -11,23 +11,24 @@ import (
 )
 
 type ConsumerConfig struct {
-	ID                        string
-	StreamName                string
-	EfoConsumerArn            string
-	ProcessFn                 func(types.Record)
-	Name                      string
-	ManagerID                 int
-	KinesisClient             *kinesis.Client
-	ManagerUrls               string
-	EtcdPeerUrls              string
-	EtcdClientUrls            string
-	ManagerListenAddress      string
-	EtcdListenClientAddress   string
-	EtcdListenPeerAddress     string
-	LeadershipTtlSeconds      int
-	HealthcheckTimeoutSeconds int
-	EtcdStartTimeoutSeconds   int
-	logger                    *zap.Logger
+	ID                         string
+	StreamName                 string
+	EfoConsumerArn             string
+	ProcessFn                  func(types.Record)
+	Name                       string
+	ManagerID                  int
+	KinesisClient              *kinesis.Client
+	ManagerUrls                string
+	EtcdPeerUrls               string
+	EtcdClientUrls             string
+	ManagerListenAddress       string
+	EtcdListenClientAddress    string
+	EtcdListenPeerAddress      string
+	LeadershipTtlSeconds       int
+	HealthcheckTimeoutSeconds  int
+	ShardReleaseTimeoutSeconds int
+	EtcdStartTimeoutSeconds    int
+	logger                     *zap.Logger
 }
 
 func (cfg *ConsumerConfig) GetClientConnectionUrls() []string {

@@ -26,21 +26,22 @@ type Consumer struct {
 
 func MustNewConsumer(name, streamName, efoConsumerArn string, processFn func(types.Record), opts ...func(*ConsumerConfig)) *Consumer {
 	config := &ConsumerConfig{
-		ID:                        uuid.NewString(),
-		Name:                      name,
-		StreamName:                streamName,
-		EfoConsumerArn:            efoConsumerArn,
-		ProcessFn:                 processFn,
-		ManagerID:                 1,
-		EtcdListenPeerAddress:     "0.0.0.0",
-		EtcdListenClientAddress:   "0.0.0.0",
-		ManagerListenAddress:      "0.0.0.0",
-		EtcdPeerUrls:              "http://0.0.0.0:11001",
-		EtcdClientUrls:            "http://0.0.0.0:12001",
-		ManagerUrls:               "http://0.0.0.0:13001",
-		LeadershipTtlSeconds:      60,
-		HealthcheckTimeoutSeconds: 5,
-		EtcdStartTimeoutSeconds:   30,
+		ID:                         uuid.NewString(),
+		Name:                       name,
+		StreamName:                 streamName,
+		EfoConsumerArn:             efoConsumerArn,
+		ProcessFn:                  processFn,
+		ManagerID:                  1,
+		EtcdListenPeerAddress:      "0.0.0.0",
+		EtcdListenClientAddress:    "0.0.0.0",
+		ManagerListenAddress:       "0.0.0.0",
+		EtcdPeerUrls:               "http://0.0.0.0:11001",
+		EtcdClientUrls:             "http://0.0.0.0:12001",
+		ManagerUrls:                "http://0.0.0.0:13001",
+		LeadershipTtlSeconds:       60,
+		HealthcheckTimeoutSeconds:  5,
+		EtcdStartTimeoutSeconds:    30,
+		ShardReleaseTimeoutSeconds: 5,
 	}
 
 	for _, opt := range opts {
