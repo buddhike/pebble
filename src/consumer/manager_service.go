@@ -193,13 +193,7 @@ func (m *ManagerService) Start() error {
 }
 
 func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
 	defer r.Body.Close()
-
-	if !m.ensureInService(w) {
-		return
-	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -216,6 +210,26 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	response := m.handleAssignRequest(&request)
+
+	res, err := json.Marshal(response)
+	if err != nil {
+		m.logger.Error("error marshaling assign response", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(res)
+}
+
+func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResponse {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	status := m.ensureInService()
+	if status.NotInService {
+		return &AssignResponse{Status: status}
+	}
 	// move shards from workers that have not sent a heartbeat within the timeout back to the unassigned pool
 	for {
 		leastActiveWorkerID, _ := m.workerHeartbeats.Peek()
@@ -244,16 +258,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	m.workerHeartbeats.Push(request.WorkerID, float64(worker.lastHeartbeat.UnixMilli()))
 
 	if request.MaxShards == 0 {
-		response := AssignResponse{}
-
-		res, err := json.Marshal(response)
-		if err != nil {
-			m.logger.Error("error marshaling assign response", zap.Error(err))
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.Write(res)
-		return
+		return &AssignResponse{}
 	}
 
 	if len(m.unassignedShards) == 0 {
@@ -335,29 +340,14 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		sn := m.checkpoints[*a.shard.ShardId]
 		assignments = append(assignments, Assignment{ShardID: *a.shard.ShardId, SequenceNumber: sn})
 	}
-	response := AssignResponse{
+
+	return &AssignResponse{
 		Assignments: assignments,
 	}
-
-	res, err := json.Marshal(response)
-	if err != nil {
-		m.logger.Error("error marshaling assign response", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(res)
 }
 
 func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
 	defer r.Body.Close()
-
-	if !m.ensureInService(w) {
-		return
-	}
 
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -374,24 +364,43 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	worker := m.workers[request.WorkerID]
-	if worker == nil || worker.assignments[request.ShardID] == nil {
-		// Worker doesn't exist, ownership changed
-		response := CheckpointResponse{
-			OwnershipChanged: true,
-		}
-		res, _ := json.Marshal(response)
-		w.WriteHeader(http.StatusOK)
-		w.Write(res)
+	response, err := m.handleCheckpointRequest(&request)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("checkpoint failed"))
 		return
 	}
 
-	// Store checkpoint in KVS
-	_, err = m.kvs.Put(context.Background(), request.ShardID, request.SequenceNumber)
+	res, err := json.Marshal(response)
 	if err != nil {
-		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
+		m.logger.Error("error marshaling checkpoint response", zap.Error(err))
 		w.WriteHeader(http.StatusInternalServerError)
 		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(res)
+}
+
+func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*CheckpointResponse, error) {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+
+	status := m.ensureInService()
+	if status.NotInService {
+		return &CheckpointResponse{Status: status}, nil
+	}
+
+	worker := m.workers[request.WorkerID]
+	if worker == nil || worker.assignments[request.ShardID] == nil {
+		// Worker doesn't exist, ownership changed
+		return &CheckpointResponse{OwnershipChanged: true}, nil
+	}
+
+	// Store checkpoint in KVS
+	_, err := m.kvs.Put(context.Background(), request.ShardID, request.SequenceNumber)
+	if err != nil {
+		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
+		return nil, err
 	}
 
 	// Worker owns the shard, update checkpoint
@@ -403,27 +412,9 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 		delete(worker.assignments, request.ShardID)
 		m.releaseRequests.Remove(assignment.releaseRequest)
 		m.unassignedShards = append(m.unassignedShards, assignment.shard)
-		response := CheckpointResponse{
-			OwnershipChanged: true,
-		}
-		res, _ := json.Marshal(response)
-		w.WriteHeader(http.StatusOK)
-		w.Write(res)
-		return
+		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
-
-	response := CheckpointResponse{
-		Status:           Status{NotInService: false},
-		OwnershipChanged: false,
-	}
-	res, err := json.Marshal(response)
-	if err != nil {
-		m.logger.Error("error marshaling checkpoint response", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(res)
+	return &CheckpointResponse{}, nil
 }
 
 func (m *ManagerService) Status(w http.ResponseWriter, r *http.Request) {
@@ -435,13 +426,12 @@ func (m *ManagerService) Status(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *ManagerService) ensureInService(w http.ResponseWriter) bool {
+func (m *ManagerService) ensureInService() Status {
+	s := Status{}
 	if !m.inService {
-		r, _ := json.Marshal(CheckpointResponse{Status: Status{NotInService: true}})
-		w.WriteHeader(http.StatusOK)
-		w.Write(r)
+		s.NotInService = true
 	}
-	return m.inService
+	return s
 }
 
 func (m *ManagerService) SetInService(inService bool) {
@@ -512,11 +502,24 @@ func (m *ManagerService) Health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
+	res := m.handleStateRequest()
+	buf, err := json.Marshal(res)
+	if err != nil {
+		m.logger.Error("error when marshaling state response", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(buf)
+}
+
+func (m *ManagerService) handleStateRequest() *StateResponse {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
-	if !m.ensureInService(w) {
-		return
+	status := m.ensureInService()
+	if status.NotInService {
+		return &StateResponse{Status: status}
 	}
 
 	shards := make([]ShardState, 0)
@@ -562,17 +565,8 @@ func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
 		return 0
 	})
 
-	res := &StateResponse{
+	return &StateResponse{
 		Shards:  shards,
 		Workers: workers,
 	}
-
-	buf, err := json.Marshal(res)
-	if err != nil {
-		m.logger.Error("error when marshaling state response", zap.Error(err))
-		w.WriteHeader(http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	w.Write(buf)
 }
