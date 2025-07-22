@@ -1,4 +1,4 @@
-package consumer
+package main
 
 import (
 	"fmt"
@@ -9,14 +9,14 @@ import (
 )
 
 type EtcdServer struct {
-	cfg              *ConsumerConfig
+	cfg              *PopConfig
 	done             chan struct{}
 	stop             chan struct{}
 	startStopTimeout time.Duration
 	logger           *zap.Logger
 }
 
-func NewEtcdServer(cfg *ConsumerConfig, stop chan struct{}, logger *zap.Logger) *EtcdServer {
+func NewEtcdServer(cfg *PopConfig, stop chan struct{}, logger *zap.Logger) *EtcdServer {
 	return &EtcdServer{
 		cfg:              cfg,
 		done:             make(chan struct{}),

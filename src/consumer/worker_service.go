@@ -15,12 +15,13 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
+	"github.com/buddhike/pebble/messages"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 type shardProcessor struct {
-	Assignment *Assignment
+	Assignment *messages.Assignment
 	Done       chan struct{}
 	Stop       chan struct{}
 }
@@ -46,7 +47,7 @@ func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}, logger 
 		kds:             kds,
 		done:            make(chan struct{}),
 		stop:            stop,
-		managerUrls:     strings.Split(cfg.ManagerUrls, ","),
+		managerUrls:     strings.Split(cfg.PopUrls, ","),
 		logger:          logger.Named(fmt.Sprintf("Worker-%s", id)),
 		maxShards:       1,
 		mut:             &sync.Mutex{},
@@ -77,7 +78,7 @@ func (w *WorkerService) Start() {
 				return
 			default:
 				// Create assign request
-				assignReq := AssignRequest{
+				assignReq := messages.AssignRequest{
 					WorkerID:  w.cfg.ID,
 					MaxShards: w.maxShards,
 				}
@@ -124,7 +125,7 @@ func (w *WorkerService) Start() {
 				}
 
 				// Unmarshal response
-				var assignResp AssignResponse
+				var assignResp messages.AssignResponse
 				err = json.Unmarshal(respBody, &assignResp)
 				if err != nil {
 					w.logger.Info("failed to unmarshal assign response", zap.Error(err), zap.String("assign_response", string(respBody)))
@@ -143,7 +144,7 @@ func (w *WorkerService) Start() {
 
 				// Check if we got any assignments
 				if len(assignResp.Assignments) > 0 {
-					lt := make(map[string]*Assignment)
+					lt := make(map[string]*messages.Assignment)
 					start := make([]*shardProcessor, 0)
 					stop := make([]*shardProcessor, 0)
 					// Evaluate what we need to start
@@ -295,7 +296,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			// Checkpoint after processing records
 			if len(evt.Value.Records) > 0 {
 				lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
-				checkpointReq := CheckpointRequest{
+				checkpointReq := messages.CheckpointRequest{
 					WorkerID:       w.cfg.ID,
 					ShardID:        assignment.ShardID,
 					SequenceNumber: *lastRecord.SequenceNumber,
@@ -320,7 +321,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 					continue
 				}
 
-				var checkpointResp CheckpointResponse
+				var checkpointResp messages.CheckpointResponse
 				err = json.Unmarshal(respBody, &checkpointResp)
 				if err != nil {
 					w.logger.Error("failed to unmarshal checkpoint response: %v", zap.Error(err))
@@ -329,7 +330,8 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 
 				if checkpointResp.OwnershipChanged {
 					w.logger.Info("ownership changed", zap.String("ShardID", assignment.ShardID))
-					return false, sn
+					eventStream = nil
+					break
 				}
 
 				if checkpointResp.NotInService {

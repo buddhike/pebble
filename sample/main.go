@@ -12,30 +12,23 @@ import (
 )
 
 var (
-	stream            string
 	streamConsumerArn string
-	managerID         int
+	popUrls           string
 )
 
 func init() {
-	flag.StringVar(&stream, "stream", "", "Name of KDS stream")
 	flag.StringVar(&streamConsumerArn, "stream-consumer-arn", "", "EFO consumer ARN")
-	flag.IntVar(&managerID, "manager-id", 0, "Manager ID for clustering")
+	flag.StringVar(&popUrls, "pop-urls", "", "POP urls")
 }
 
 func main() {
 	flag.Parse()
 
-	peerUrls := consumer.WithEtcdPeerUrls("http://localhost:11001,http://localhost:11002,http://localhost:11003")
-	clientUrls := consumer.WithEtcdClientUrls("http://localhost:12001,http://localhost:12002,http://localhost:12003")
-	managerUrls := consumer.WithManagerUrls("http://localhost:13001,http://localhost:13002,http://localhost:13003")
-	managerID := consumer.WithManagerID(managerID)
-
 	processFn := func(record types.Record) {
 		fmt.Printf("Processing record: %s\n", *record.PartitionKey)
 	}
 
-	c := consumer.MustNewDevelopmentConsumer("my-consumer", stream, streamConsumerArn, processFn, managerID, managerUrls, clientUrls, peerUrls)
+	c := consumer.MustNewConsumer("my-consumer", streamConsumerArn, popUrls, processFn)
 
 	// Start the consumer
 	err := c.Start()

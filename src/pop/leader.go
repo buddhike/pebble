@@ -1,4 +1,4 @@
-package consumer
+package main
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 )
 
 type Leader struct {
-	cfg        *ConsumerConfig
+	cfg        *PopConfig
 	etcdClient *clientv3.Client
 	done       chan struct{}
 	stop       chan struct{}
@@ -17,7 +17,7 @@ type Leader struct {
 	logger     *zap.Logger
 }
 
-func NewLeader(cfg *ConsumerConfig, mgr *ManagerService, etcdClient *clientv3.Client, stop chan struct{}, logger *zap.Logger) *Leader {
+func NewLeader(cfg *PopConfig, mgr *ManagerService, etcdClient *clientv3.Client, stop chan struct{}, logger *zap.Logger) *Leader {
 	return &Leader{
 		cfg:        cfg,
 		etcdClient: etcdClient,
