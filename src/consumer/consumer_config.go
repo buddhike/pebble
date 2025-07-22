@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
@@ -11,24 +12,25 @@ import (
 )
 
 type ConsumerConfig struct {
-	ID                         string
-	StreamName                 string
-	EfoConsumerArn             string
-	ProcessFn                  func(types.Record)
-	Name                       string
-	ManagerID                  int
-	KinesisClient              *kinesis.Client
-	ManagerUrls                string
-	EtcdPeerUrls               string
-	EtcdClientUrls             string
-	ManagerListenAddress       string
-	EtcdListenClientAddress    string
-	EtcdListenPeerAddress      string
-	LeadershipTtlSeconds       int
-	HealthcheckTimeoutSeconds  int
-	ShardReleaseTimeoutSeconds int
-	EtcdStartTimeoutSeconds    int
-	logger                     *zap.Logger
+	ID                                  string
+	StreamName                          string
+	EfoConsumerArn                      string
+	ProcessFn                           func(types.Record)
+	Name                                string
+	ManagerID                           int
+	KinesisClient                       *kinesis.Client
+	ManagerUrls                         string
+	EtcdPeerUrls                        string
+	EtcdClientUrls                      string
+	ManagerListenAddress                string
+	EtcdListenClientAddress             string
+	EtcdListenPeerAddress               string
+	LeadershipTtlSeconds                int
+	HealthcheckTimeoutMilliseconds      int
+	WorkerInactivityTimeoutMilliseconds int
+	ShardReleaseTimeoutMilliseconds     int
+	EtcdStartTimeoutSeconds             int
+	logger                              *zap.Logger
 }
 
 func (cfg *ConsumerConfig) GetClientConnectionUrls() []string {
@@ -112,6 +114,18 @@ func (cfg *ConsumerConfig) GetCurrentNodeClientConnectionUrl() string {
 	return cfg.GetClientConnectionUrls()[cfg.ManagerID-1]
 }
 
+func (cfg *ConsumerConfig) HealthcheckTimeout() time.Duration {
+	return time.Duration(cfg.HealthcheckTimeoutMilliseconds) * time.Millisecond
+}
+
+func (cfg *ConsumerConfig) WorkerInactivityTimeout() time.Duration {
+	return time.Duration(cfg.WorkerInactivityTimeoutMilliseconds) * time.Millisecond
+}
+
+func (cfg *ConsumerConfig) ShardReleaseTimeout() time.Duration {
+	return time.Duration(cfg.ShardReleaseTimeoutMilliseconds) * time.Millisecond
+}
+
 func WithManagerListenAddress(addr string) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.ManagerListenAddress = addr
@@ -166,9 +180,15 @@ func WithManagerID(id int) func(*ConsumerConfig) {
 	}
 }
 
-func WithHealthCheckTimeoutSeconds(timeout int) func(*ConsumerConfig) {
+func WithHealthCheckTimeoutMilliseconds(timeout int) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
-		cfg.HealthcheckTimeoutSeconds = timeout
+		cfg.HealthcheckTimeoutMilliseconds = timeout
+	}
+}
+
+func WithWorkerInactivityTimeoutMilliseconds(timeout int) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.WorkerInactivityTimeoutMilliseconds = timeout
 	}
 }
 

@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
@@ -18,27 +19,38 @@ import (
 	"go.uber.org/zap"
 )
 
+type shardProcessor struct {
+	Assignment *Assignment
+	Done       chan struct{}
+	Stop       chan struct{}
+}
+
 type WorkerService struct {
-	cfg          *ConsumerConfig
-	kds          aws.Kinesis
-	done         chan struct{}
-	stop         chan struct{}
-	managerUrls  []string
-	managerIndex int
-	logger       *zap.Logger
-	maxShards    int
+	cfg               *ConsumerConfig
+	kds               aws.Kinesis
+	done              chan struct{}
+	stop              chan struct{}
+	managerUrls       []string
+	managerIndex      int
+	logger            *zap.Logger
+	maxShards         int
+	mut               *sync.Mutex
+	lastHeartbeatTime time.Time
+	shardProcessors   map[string]*shardProcessor
 }
 
 func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}, logger *zap.Logger) *WorkerService {
 	id := fmt.Sprintf("%s-%s", cfg.Name, uuid.NewString())
 	return &WorkerService{
-		cfg:         cfg,
-		kds:         kds,
-		done:        make(chan struct{}),
-		stop:        stop,
-		managerUrls: strings.Split(cfg.ManagerUrls, ","),
-		logger:      logger.Named(fmt.Sprintf("Worker-%s", id)),
-		maxShards:   1,
+		cfg:             cfg,
+		kds:             kds,
+		done:            make(chan struct{}),
+		stop:            stop,
+		managerUrls:     strings.Split(cfg.ManagerUrls, ","),
+		logger:          logger.Named(fmt.Sprintf("Worker-%s", id)),
+		maxShards:       1,
+		mut:             &sync.Mutex{},
+		shardProcessors: make(map[string]*shardProcessor),
 	}
 }
 
@@ -58,7 +70,6 @@ func (w *WorkerService) Start() {
 	go func() {
 		defer close(w.done)
 
-		processors := make([]chan struct{}, 0)
 		for {
 			select {
 			case <-w.stop:
@@ -79,7 +90,7 @@ func (w *WorkerService) Start() {
 					case <-w.stop:
 						w.logger.Info("worker is stopped while awiting retry assign request")
 						return
-					case <-time.After(5 * time.Second):
+					case <-time.After(w.cfg.HealthcheckTimeout()):
 						continue
 					}
 				}
@@ -93,7 +104,7 @@ func (w *WorkerService) Start() {
 					case <-w.stop:
 						w.logger.Info("shutting down worker")
 						return
-					case <-time.After(5 * time.Second):
+					case <-time.After(w.cfg.HealthcheckTimeout()):
 						continue
 					}
 				}
@@ -107,7 +118,7 @@ func (w *WorkerService) Start() {
 					case <-w.stop:
 						w.logger.Info("shutting down worker")
 						return
-					case <-time.After(5 * time.Second):
+					case <-time.After(w.cfg.HealthcheckTimeout()):
 						continue
 					}
 				}
@@ -121,7 +132,7 @@ func (w *WorkerService) Start() {
 					case <-w.stop:
 						w.logger.Info("shutting down worker")
 						return
-					case <-time.After(5 * time.Second):
+					case <-time.After(w.cfg.HealthcheckTimeout()):
 						continue
 					}
 				}
@@ -132,24 +143,66 @@ func (w *WorkerService) Start() {
 
 				// Check if we got any assignments
 				if len(assignResp.Assignments) > 0 {
-					w.logger.Info("shutting down worker")
-					w.logger.Info("shards assigned", zap.Int("count", len(assignResp.Assignments)))
-					for _, assignment := range assignResp.Assignments {
-						done := make(chan struct{})
-						go w.processShard(assignment, done)
+					lt := make(map[string]*Assignment)
+					start := make([]*shardProcessor, 0)
+					stop := make([]*shardProcessor, 0)
+					// Evaluate what we need to start
+					for _, a := range assignResp.Assignments {
+						lt[a.ShardID] = &a
+						p := w.shardProcessors[a.ShardID]
+						if p == nil {
+							start = append(start, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
+						}
 					}
-					w.maxShards = w.maxShards * 2
+					// Evaluate which shard processors to stop
+					for k, v := range w.shardProcessors {
+						if lt[k] == nil {
+							stop = append(stop, v)
+						}
+					}
+					// Keep track of the new processors
+					for _, s := range start {
+						w.shardProcessors[s.Assignment.ShardID] = s
+					}
+					// Make liveness visibile to go routines processing shards
+					w.mut.Lock()
+					w.lastHeartbeatTime = time.Now()
+					w.mut.Unlock()
+					// Start new processors
+					for _, p := range start {
+						w.logger.Info("processing shard", zap.String("shard id", p.Assignment.ShardID))
+						go w.processShard(p)
+					}
+					// Stop processors no longer owned in a non-blocking manner
+					for _, s := range stop {
+						w.logger.Info("releasing shard", zap.String("shard id", s.Assignment.ShardID))
+						delete(w.shardProcessors, s.Assignment.ShardID)
+						go func() {
+							close(s.Stop)
+							<-s.Done
+						}()
+					}
+					if len(start) > 0 {
+						w.maxShards = w.maxShards * 2
+						// reset if we wrap around int bounds
+						if w.maxShards < 0 {
+							w.maxShards = 1
+						}
+					}
 				}
 
 				// Wait before next request with stop signal handling
 				select {
 				case <-w.stop:
 					w.logger.Info("shutting down worker")
-					for _, p := range processors {
-						<-p
+					for _, p := range w.shardProcessors {
+						close(p.Stop)
+					}
+					for _, p := range w.shardProcessors {
+						<-p.Done
 					}
 					return
-				case <-time.After(5 * time.Second):
+				case <-time.After(w.cfg.HealthcheckTimeout()):
 					// Continue to next iteration
 				}
 			}
@@ -157,10 +210,11 @@ func (w *WorkerService) Start() {
 	}()
 }
 
-func (w *WorkerService) processShard(assignment Assignment, done chan struct{}) {
-	defer close(done)
+func (w *WorkerService) processShard(p *shardProcessor) {
+	defer close(p.Done)
 	sequenceNumber := ""
 	okToSubscribe := true
+	assignment := p.Assignment
 
 	for okToSubscribe {
 		// Determine starting position for subscription
@@ -189,18 +243,29 @@ func (w *WorkerService) processShard(assignment Assignment, done chan struct{}) 
 		}
 
 		// Subscribe to shard
-		output, err := w.kds.SubscribeToShard(context.Background(), subscribeInput)
-		if err != nil {
-			w.logger.Info("failed to subscribe to shard", zap.String("shard-id", assignment.ShardID), zap.Error(err))
+		select {
+		case <-p.Stop:
 			return
+		default:
+			w.mut.Lock()
+			timedout := time.Since(w.lastHeartbeatTime) >= w.cfg.WorkerInactivityTimeout()
+			w.mut.Unlock()
+			if timedout {
+				return
+			}
+			output, err := w.kds.SubscribeToShard(context.Background(), subscribeInput)
+			if err != nil {
+				w.logger.Info("failed to subscribe to shard", zap.String("shard-id", assignment.ShardID), zap.Error(err))
+				continue
+			}
+			// Process events from the subscription with stop signal handling
+			okToSubscribe, sequenceNumber = w.handleSubscription(output, p)
 		}
-
-		// Process events from the subscription with stop signal handling
-		okToSubscribe, sequenceNumber = w.handleSubscription(output, assignment)
 	}
 }
 
-func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutput, assignment Assignment) (bool, string) {
+func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutput, p *shardProcessor) (bool, string) {
+	assignment := p.Assignment
 	eventStream := output.GetStream().Events()
 	sn := ""
 	for {
@@ -275,7 +340,9 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 				sn = *lastRecord.SequenceNumber
 				w.logger.Info("successfully checkpointed shard", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", *lastRecord.SequenceNumber))
 			}
-
+		case <-p.Stop:
+			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
+			return false, ""
 		case <-w.stop:
 			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
 			return false, ""

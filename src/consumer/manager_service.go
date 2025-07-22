@@ -65,22 +65,21 @@ import (
 //
 
 type ManagerService struct {
-	mut                *sync.Mutex
-	inService          bool
-	kds                aws.Kinesis
-	kvs                KVS
-	cfg                *ConsumerConfig
-	shards             []types.Shard
-	unassignedShards   []*types.Shard
-	checkpoints        map[string]string
-	done               chan struct{}
-	stop               chan struct{}
-	workers            map[string]*workerData
-	workerHeartbeats   *primitives.PriorityQueue[string]
-	workerShardCount   *primitives.PriorityQueue[*workerData]
-	releaseRequests    *primitives.PriorityQueue[*releaseRequest]
-	healthcheckTimeout time.Duration
-	logger             *zap.Logger
+	mut              *sync.Mutex
+	inService        bool
+	kds              aws.Kinesis
+	kvs              KVS
+	cfg              *ConsumerConfig
+	shards           []types.Shard
+	unassignedShards []*types.Shard
+	checkpoints      map[string]string
+	done             chan struct{}
+	stop             chan struct{}
+	workers          map[string]*workerData
+	workerHeartbeats *primitives.PriorityQueue[string]
+	workerShardCount *primitives.PriorityQueue[*workerData]
+	releaseRequests  *primitives.PriorityQueue[*releaseRequest]
+	logger           *zap.Logger
 }
 
 type Status struct {
@@ -90,19 +89,19 @@ type Status struct {
 type workerData struct {
 	workerID         string
 	lastHeartbeat    time.Time
-	assignedShards   map[string]*shardState
+	assignments      map[string]*assignment
 	activeShardCount int
 }
 
-type shardState struct {
+type assignment struct {
 	shard          *types.Shard
 	releaseRequest *releaseRequest
-	workerData     *workerData
+	worker         *workerData
 }
 
 type releaseRequest struct {
 	createdAt  time.Time
-	shardState *shardState
+	shardState *assignment
 }
 
 type Assignment struct {
@@ -139,6 +138,7 @@ type ShardState struct {
 
 type WorkerState struct {
 	WorkerID               string
+	AssignmentsLength      int
 	NumberOfAssignedShards int
 }
 
@@ -150,18 +150,17 @@ type StateResponse struct {
 
 func NewManagerService(cfg *ConsumerConfig, kds aws.Kinesis, kvs KVS, stop chan struct{}, logger *zap.Logger) *ManagerService {
 	return &ManagerService{
-		cfg:                cfg,
-		mut:                &sync.Mutex{},
-		kds:                kds,
-		kvs:                kvs,
-		done:               make(chan struct{}),
-		stop:               stop,
-		workers:            make(map[string]*workerData),
-		workerHeartbeats:   primitives.NewPriorityQueue[string](false),
-		workerShardCount:   primitives.NewPriorityQueue[*workerData](true),
-		releaseRequests:    primitives.NewPriorityQueue[*releaseRequest](false),
-		healthcheckTimeout: time.Second * time.Duration(cfg.HealthcheckTimeoutSeconds),
-		logger:             logger.Named("managerservice").With(zap.Int("managerid", cfg.ManagerID)),
+		cfg:              cfg,
+		mut:              &sync.Mutex{},
+		kds:              kds,
+		kvs:              kvs,
+		done:             make(chan struct{}),
+		stop:             stop,
+		workers:          make(map[string]*workerData),
+		workerHeartbeats: primitives.NewPriorityQueue[string](false),
+		workerShardCount: primitives.NewPriorityQueue[*workerData](true),
+		releaseRequests:  primitives.NewPriorityQueue[*releaseRequest](false),
+		logger:           logger.Named("managerservice").With(zap.Int("managerid", cfg.ManagerID)),
 	}
 }
 
@@ -217,11 +216,27 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// move shards from workers that have not sent a heartbeat within the timeout back to the unassigned pool
+	for {
+		leastActiveWorkerID, _ := m.workerHeartbeats.Peek()
+		leastActiveWorker := m.workers[leastActiveWorkerID]
+		if leastActiveWorker == nil || time.Since(leastActiveWorker.lastHeartbeat) < m.cfg.WorkerInactivityTimeout() {
+			break
+		}
+		for _, a := range m.workers[leastActiveWorkerID].assignments {
+			m.unassignedShards = append(m.unassignedShards, a.shard)
+		}
+		// cleanup worker from all data structures
+		m.workerHeartbeats.Pop()
+		m.workerShardCount.Remove(leastActiveWorker)
+		delete(m.workers, leastActiveWorkerID)
+	}
+
 	worker := m.workers[request.WorkerID]
 	if worker == nil {
 		worker = &workerData{
-			workerID:       request.WorkerID,
-			assignedShards: make(map[string]*shardState),
+			workerID:    request.WorkerID,
+			assignments: make(map[string]*assignment),
 		}
 		m.workers[request.WorkerID] = worker
 	}
@@ -241,20 +256,6 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// move shards from workers that have not sent a heartbeat within the timeout back to the unassigned pool
-	for {
-		leastActiveWorkerID, _ := m.workerHeartbeats.Peek()
-		leastActiveWorker := m.workers[leastActiveWorkerID]
-		if time.Since(leastActiveWorker.lastHeartbeat) < time.Second*5 {
-			break
-		}
-		m.workerHeartbeats.Pop()
-		for _, a := range m.workers[leastActiveWorkerID].assignedShards {
-			m.unassignedShards = append(m.unassignedShards, a.shard)
-		}
-		leastActiveWorker.assignedShards = make(map[string]*shardState)
-	}
-
 	if len(m.unassignedShards) == 0 {
 		// at this point, there are no unassigned shards available
 		// we now check if any shards need to be forcefully released so they can be assigned in this request
@@ -271,57 +272,69 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		// make shards available for reassignment if they have not been released within the expected
 		// time after a release request
 		rr, ok := m.releaseRequests.Peek()
-		n := time.Now()
 		forceReleaseCount := 0
-		for ok && n.Sub(rr.createdAt) >= time.Duration(m.cfg.ShardReleaseTimeoutSeconds) {
-			if request.WorkerID == rr.shardState.workerData.workerID || forceReleaseCount == target {
+		for ok && time.Since(rr.createdAt) >= m.cfg.ShardReleaseTimeout() {
+			if request.WorkerID == rr.shardState.worker.workerID || forceReleaseCount == target {
 				break
 			}
 			forceReleaseCount++
 			m.unassignedShards = append(m.unassignedShards, rr.shardState.shard)
-			delete(rr.shardState.workerData.assignedShards, *rr.shardState.shard.ShardId)
+			delete(rr.shardState.worker.assignments, *rr.shardState.shard.ShardId)
 			m.releaseRequests.Pop()
 			rr, ok = m.releaseRequests.Peek()
 		}
 	}
 
 	count := min(request.MaxShards, len(m.unassignedShards))
-	var assignments []Assignment
+	oldActiveShardCount := worker.activeShardCount
 	for _, s := range m.unassignedShards[0:count] {
-		worker.assignedShards[*s.ShardId] = &shardState{shard: s, workerData: worker}
-		sn := m.checkpoints[*s.ShardId]
-		assignments = append(assignments, Assignment{ShardID: *s.ShardId, SequenceNumber: sn})
+		worker.assignments[*s.ShardId] = &assignment{shard: s, worker: worker}
 		worker.activeShardCount++
 	}
 	m.unassignedShards = m.unassignedShards[count:]
 	m.workerShardCount.Push(worker, float64(worker.activeShardCount))
 
 	// if no shards were assigned in this round, attempt to rebalance by stealing shards from overloaded workers
-	if len(assignments) == 0 {
-		// calculate how many shards should be redistributed from other workers to achieve a balanced assignment
-		idealCountPerWorker := len(m.shards) / len(m.workers)
-		// we use min here to ensure that we do not attempt to assign or steal more shards than are available or allowed by the worker's maxshards limit,
-		// maintaining a fair and safe distribution
-		count := min(request.MaxShards, idealCountPerWorker)
-		for range count {
-			// stop if there are no suitable workers to steal from, if the worker with the most shards is the requester,
-			// or if the worker with the most shards only has one shard left (cannot steal)
+	if oldActiveShardCount == worker.activeShardCount {
+		// attempt to rebalance shards by redistributing from overloaded workers to this worker, aiming for an even shard distribution
+		ideal := len(m.shards) / len(m.workers)
+		// determine the maximum number of shards a worker should ideally have
+		idealMax := ideal
+		if len(m.shards)%len(m.workers) > 0 {
+			idealMax++
+		}
+		target := ideal - worker.activeShardCount
+		target = max(target, 0)
+		// use min to ensure we do not try to assign or steal more shards than are available or allowed by maxshards, keeping distribution fair and safe
+		count := min(request.MaxShards, target)
+		for count != 0 {
+			// stop if there are no eligible workers to steal from, if the worker with the most shards is the requester,
+			// or if the worker with the most shards does not exceed the ideal max (nothing to steal)
 			w, _ := m.workerShardCount.Peek()
-			if w == nil || w.workerID == request.WorkerID || w.activeShardCount == 1 {
+			if w == nil || w.workerID == request.WorkerID || w.activeShardCount <= idealMax {
 				break
 			}
-			for _, v := range w.assignedShards {
+			for _, v := range w.assignments {
 				if v.releaseRequest == nil {
 					v.releaseRequest = &releaseRequest{createdAt: time.Now(), shardState: v}
 					m.releaseRequests.Push(v.releaseRequest, float64(v.releaseRequest.createdAt.UnixMilli()))
 					w.activeShardCount--
 					m.workerShardCount.Push(w, float64(w.activeShardCount))
+					count--
 					break
 				}
 			}
 		}
 	}
 
+	var assignments []Assignment
+	for _, a := range worker.assignments {
+		if a.releaseRequest != nil {
+			continue
+		}
+		sn := m.checkpoints[*a.shard.ShardId]
+		assignments = append(assignments, Assignment{ShardID: *a.shard.ShardId, SequenceNumber: sn})
+	}
 	response := AssignResponse{
 		Assignments: assignments,
 	}
@@ -362,7 +375,7 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	}
 
 	worker := m.workers[request.WorkerID]
-	if worker == nil || worker.assignedShards[request.ShardID] == nil {
+	if worker == nil || worker.assignments[request.ShardID] == nil {
 		// Worker doesn't exist, ownership changed
 		response := CheckpointResponse{
 			OwnershipChanged: true,
@@ -385,9 +398,9 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	m.checkpoints[request.ShardID] = request.SequenceNumber
 
 	// Release the shard is it has been requested
-	assignment := worker.assignedShards[request.ShardID]
+	assignment := worker.assignments[request.ShardID]
 	if assignment.releaseRequest != nil {
-		delete(worker.assignedShards, request.ShardID)
+		delete(worker.assignments, request.ShardID)
 		m.releaseRequests.Remove(assignment.releaseRequest)
 		m.unassignedShards = append(m.unassignedShards, assignment.shard)
 		response := CheckpointResponse{
@@ -485,7 +498,7 @@ func (m *ManagerService) SetInService(inService bool) {
 }
 
 func (m *ManagerService) Health(w http.ResponseWriter, r *http.Request) {
-	ctx, cancel := context.WithTimeout(context.Background(), m.healthcheckTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), m.cfg.HealthcheckTimeout())
 	_, err := m.kvs.Get(ctx, "/healthcheck")
 	cancel()
 	if err != nil {
@@ -510,7 +523,7 @@ func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
 	for _, s := range m.shards {
 		var wd *workerData
 		for _, v := range m.workers {
-			if v.assignedShards[*s.ShardId] != nil {
+			if v.assignments[*s.ShardId] != nil {
 				wd = v
 				break
 			}
@@ -526,7 +539,7 @@ func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
 
 	workers := make([]WorkerState, 0)
 	for k, w := range m.workers {
-		workers = append(workers, WorkerState{WorkerID: k, NumberOfAssignedShards: len(w.assignedShards)})
+		workers = append(workers, WorkerState{WorkerID: k, NumberOfAssignedShards: w.activeShardCount, AssignmentsLength: len(w.assignments)})
 	}
 
 	slices.SortFunc(shards, func(a, b ShardState) int {

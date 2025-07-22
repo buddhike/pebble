@@ -12,6 +12,12 @@
             "mode": "auto",
             "program": "${fileDirname}",
             "args": ["--stream", "test2", "--stream-consumer-arn", "arn:aws:kinesis:ap-southeast-2:767660010185:stream/test2/consumer/test:1731384474"],
+        },
+        {
+            "name": "Attach",
+            "type": "go",
+            "request": "attach",
+            "processId": 27050
         }
     ]
 }
