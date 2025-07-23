@@ -137,9 +137,6 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 
 func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *messages.AssignResponse {
 	now := m.clock()
-	defer func() {
-		m.logger.Info("handle assign request", zap.Int64("duration", time.Since(now).Microseconds()))
-	}()
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
