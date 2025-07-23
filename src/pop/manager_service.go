@@ -442,6 +442,7 @@ func (m *ManagerService) handleStateRequest() *messages.StateResponse {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
+	now := m.clock()
 	status := m.ensureInService()
 	if status.NotInService {
 		return &messages.StateResponse{Status: status}
@@ -457,10 +458,10 @@ func (m *ManagerService) handleStateRequest() *messages.StateResponse {
 			}
 		}
 		var workerID string
-		var lhb *time.Time
+		var lhb string
 		if wd != nil {
 			workerID = wd.workerID
-			lhb = &wd.lastHeartbeat
+			lhb = now.Sub(wd.lastHeartbeat).String()
 		}
 		shards = append(shards, messages.ShardState{ShardID: *s.ShardId, WorkerID: workerID, LastHeartbeat: lhb})
 	}

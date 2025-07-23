@@ -1,7 +1,5 @@
 package messages
 
-import "time"
-
 type Status struct {
 	NotInService bool
 }
@@ -35,7 +33,7 @@ type AssignResponse struct {
 type ShardState struct {
 	ShardID       string
 	WorkerID      string
-	LastHeartbeat *time.Time
+	LastHeartbeat string
 }
 
 type WorkerState struct {
