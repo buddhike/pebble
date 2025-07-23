@@ -154,6 +154,16 @@ func (w *WorkerService) Start() {
 						if p == nil {
 							start = append(start, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
 						}
+						// We check if a shard processor already exists for the assignment (p != nil)
+						// and if the assignment id has changed (p.Assignment.ID != a.ID).
+						// this means the assignment for the shard has changed (e.g., due to reassignment or failover),
+						// so we need to stop the old processor and start a new one with the updated assignment.
+						// this ensures that the worker is always processing the correct assignment for each shard,
+						// and prevents processing with stale or incorrect assignment information.
+						if p != nil && p.Assignment.ID != a.ID {
+							stop = append(stop, p)
+							start = append(start, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
+						}
 					}
 					// Evaluate which shard processors to stop
 					for k, v := range w.shardProcessors {

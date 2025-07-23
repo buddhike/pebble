@@ -19,22 +19,23 @@ import (
 )
 
 type ManagerService struct {
-	mut              *sync.Mutex
-	inService        bool
-	term             int64
-	kds              aws.Kinesis
-	kvs              KVS
-	cfg              *PopConfig
-	shards           []types.Shard
-	unassignedShards []*types.Shard
-	checkpoints      map[string]string
-	done             chan struct{}
-	stop             chan struct{}
-	workers          map[string]*workerInfo
-	workerHeartbeats *primitives.PriorityQueue[string]
-	workerShardCount *primitives.PriorityQueue[*workerInfo]
-	logger           *zap.Logger
-	clock            func() time.Time
+	mut                  *sync.Mutex
+	inService            bool
+	term                 int64
+	kds                  aws.Kinesis
+	kvs                  KVS
+	cfg                  *PopConfig
+	shards               []types.Shard
+	unassignedShards     []*types.Shard
+	checkpoints          map[string]string
+	done                 chan struct{}
+	stop                 chan struct{}
+	workers              map[string]*workerInfo
+	workerHeartbeats     *primitives.PriorityQueue[string]
+	workerShardCount     *primitives.PriorityQueue[*workerInfo]
+	logger               *zap.Logger
+	clock                func() time.Time
+	nextAssignmentOffset int64
 }
 
 type reassignmentOffer struct {
@@ -51,6 +52,7 @@ type workerInfo struct {
 }
 
 type assignment struct {
+	id                  int64
 	shard               *types.Shard
 	reassignmentRequest *reassignmentRequest
 	worker              *workerInfo
@@ -162,7 +164,7 @@ func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *m
 		for oldWorker, shards := range worker.reassignmentOffer.shards {
 			for _, shard := range shards {
 				delete(oldWorker.assignments, *shard.ShardId)
-				worker.assignments[*shard.ShardId] = &assignment{shard: shard, worker: worker}
+				worker.assignments[*shard.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: shard, worker: worker}
 				worker.activeShardCount++
 				noOfReassignments++
 			}
@@ -174,7 +176,7 @@ func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *m
 	remaining := max(request.MaxShards-noOfReassignments, 0)
 	count := min(remaining, len(m.unassignedShards))
 	for _, s := range m.unassignedShards[0:count] {
-		worker.assignments[*s.ShardId] = &assignment{shard: s, worker: worker}
+		worker.assignments[*s.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: s, worker: worker}
 		worker.activeShardCount++
 	}
 	m.unassignedShards = m.unassignedShards[count:]
@@ -219,7 +221,7 @@ func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *m
 	var assignments []messages.Assignment
 	for _, a := range worker.assignments {
 		sn := m.checkpoints[*a.shard.ShardId]
-		assignments = append(assignments, messages.Assignment{ShardID: *a.shard.ShardId, SequenceNumber: sn})
+		assignments = append(assignments, messages.Assignment{ID: a.id, ShardID: *a.shard.ShardId, SequenceNumber: sn})
 	}
 
 	return &messages.AssignResponse{
@@ -273,6 +275,11 @@ func (m *ManagerService) resolveActiveWorker(workerID string, at time.Time) *wor
 	worker.lastHeartbeat = at
 	m.workerHeartbeats.Push(workerID, float64(worker.lastHeartbeat.UnixMilli()))
 	return worker
+}
+
+func (m *ManagerService) getNextAssignmentID() int64 {
+	offset := m.nextAssignmentOffset
+	return m.term + offset
 }
 
 func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {

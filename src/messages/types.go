@@ -5,6 +5,7 @@ type Status struct {
 }
 
 type Assignment struct {
+	ID             int64
 	ShardID        string
 	SequenceNumber string
 }
