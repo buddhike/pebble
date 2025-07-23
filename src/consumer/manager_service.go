@@ -329,10 +329,10 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 	txn := m.kvs.Txn(context.Background())
 
 	cmps := make([]clientv3.Cmp, 2)
-	assignmentKey := fmt.Sprintf("%s-assignment-id", request.AssignmentID)
-	assignmentID := string(request.AssignmentID)
+	assignmentKey := fmt.Sprintf("%s-assignment-id", request.ShardID)
+	assignmentID := fmt.Sprintf("%d", request.AssignmentID)
 	cmps[0] = clientv3.Compare(clientv3.CreateRevision(assignmentKey), "=", 0)
-	cmps[1] = clientv3.Compare(clientv3.Value(assignmentKey), "=", request.AssignmentID)
+	cmps[1] = clientv3.Compare(clientv3.Value(assignmentKey), "=", assignmentID)
 
 	putAssignmentID := clientv3.OpPut(assignmentKey, assignmentID)
 	putCheckpoint := clientv3.OpPut(request.ShardID, request.SequenceNumber)
