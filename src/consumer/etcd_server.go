@@ -56,6 +56,8 @@ func (s *EtcdServer) Start() error {
 	cfg.ListenPeerUrls = listenPeerUrls
 	cfg.AdvertisePeerUrls = advertisePeerUrls
 	cfg.InitialCluster = s.cfg.GetInitialCluster()
+	cfg.AutoCompactionRetention = "1"
+	cfg.AutoCompactionMode = "revision"
 
 	go func() {
 		defer close(s.done)
