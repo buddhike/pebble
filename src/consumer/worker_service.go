@@ -306,6 +306,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			if len(evt.Value.Records) > 0 {
 				lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
 				checkpointReq := CheckpointRequest{
+					AssignmentID:   assignment.ID,
 					WorkerID:       w.cfg.ID,
 					ShardID:        assignment.ShardID,
 					SequenceNumber: *lastRecord.SequenceNumber,

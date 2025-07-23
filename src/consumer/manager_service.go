@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
 	"github.com/buddhike/pebble/primitives"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
 )
 
@@ -317,25 +318,42 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*CheckpointResponse, error) {
-	m.mut.Lock()
-	defer m.mut.Unlock()
-
-	status := m.ensureInService()
-	if status.NotInService {
-		return &CheckpointResponse{Status: status}, nil
-	}
-
-	worker := m.workers[request.WorkerID]
-	if worker == nil || worker.assignments[request.ShardID] == nil {
-		// Worker doesn't exist, ownership changed
-		return &CheckpointResponse{OwnershipChanged: true}, nil
+	res := m.ensureCheckpointOwnership(request)
+	if res != nil {
+		return res, nil
 	}
 
 	// Store checkpoint in KVS
-	_, err := m.kvs.Put(context.Background(), request.ShardID, request.SequenceNumber)
+	// This is performed without holding the lock to prevent holding up
+	// assignments and other checkpoints
+	txn := m.kvs.Txn(context.Background())
+
+	cmps := make([]clientv3.Cmp, 2)
+	assignmentKey := fmt.Sprintf("%s-assignment-id", request.AssignmentID)
+	assignmentID := string(request.AssignmentID)
+	cmps[0] = clientv3.Compare(clientv3.CreateRevision(assignmentKey), "=", 0)
+	cmps[1] = clientv3.Compare(clientv3.Value(assignmentKey), "=", request.AssignmentID)
+
+	putAssignmentID := clientv3.OpPut(assignmentKey, assignmentID)
+	putCheckpoint := clientv3.OpPut(request.ShardID, request.SequenceNumber)
+
+	_, err := txn.If(cmps...).Then(putAssignmentID, putCheckpoint).Commit()
 	if err != nil {
 		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
 		return nil, err
+	}
+
+	// Now that we have completed updating kvs with checkpoint, update
+	// the local state to reflect that.
+	// There's a chance that manager is not in service at this point making the
+	// following actions redundant but safe
+	m.mut.Lock()
+	defer m.mut.Unlock()
+
+	worker := m.workers[request.WorkerID]
+	if worker == nil || worker.assignments[request.ShardID] == nil || worker.assignments[request.ShardID].id != request.AssignmentID {
+		// Worker doesn't exist, ownership changed
+		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
 
 	// Worker owns the shard, update checkpoint
@@ -347,6 +365,21 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
 	return &CheckpointResponse{}, nil
+}
+
+func (m *ManagerService) ensureCheckpointOwnership(request *CheckpointRequest) *CheckpointResponse {
+	m.mut.Lock()
+	defer m.mut.Unlock()
+	status := m.ensureInService()
+	if status.NotInService {
+		return &CheckpointResponse{Status: status}
+	}
+	worker := m.workers[request.WorkerID]
+	if worker == nil || worker.assignments[request.ShardID] == nil && worker.assignments[request.ShardID].id != request.AssignmentID {
+		// Worker doesn't exist, ownership changed
+		return &CheckpointResponse{OwnershipChanged: true}
+	}
+	return nil
 }
 
 func (m *ManagerService) Status(w http.ResponseWriter, r *http.Request) {

@@ -11,6 +11,7 @@ type Assignment struct {
 }
 
 type CheckpointRequest struct {
+	AssignmentID   int64
 	WorkerID       string
 	ShardID        string
 	SequenceNumber string
