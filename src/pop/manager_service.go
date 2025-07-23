@@ -21,6 +21,7 @@ import (
 type ManagerService struct {
 	mut              *sync.Mutex
 	inService        bool
+	term             int64
 	kds              aws.Kinesis
 	kvs              KVS
 	cfg              *PopConfig
@@ -359,14 +360,7 @@ func (m *ManagerService) ensureInService() messages.Status {
 	return s
 }
 
-func (m *ManagerService) SetInService(inService bool) {
-	if !inService {
-		m.mut.Lock()
-		m.inService = inService
-		m.mut.Unlock()
-		return
-	}
-
+func (m *ManagerService) SetToInService(term int64) {
 	// Prepare everything we need before we acquire the lock to update inService
 	// status. This will prevent other API calls trying to acquire the same lock
 	// getting blocked until shards are discovered.
@@ -408,6 +402,13 @@ func (m *ManagerService) SetInService(inService bool) {
 
 	m.mut.Lock()
 	m.inService = true
+	m.term = term
+	m.mut.Unlock()
+}
+
+func (m *ManagerService) SetToOutOfService() {
+	m.mut.Lock()
+	m.inService = false
 	m.mut.Unlock()
 }
 

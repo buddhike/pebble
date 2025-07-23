@@ -59,11 +59,11 @@ func (l *Leader) elect(ctx context.Context) {
 			return
 		}
 
-		l.logger.Info("node successfully became leader", zap.String("node_id", nodeID))
+		l.logger.Info("node successfully became leader", zap.String("node_id", nodeID), zap.Int64("rev", election.Rev()))
 
 		// Perform leader work
 		l.logger.Info("node is performing leader work", zap.String("node_id", nodeID))
-		l.mgr.SetInService(true)
+		l.mgr.SetToInService(election.Rev())
 
 		// Observe leadership changes (optional - for monitoring)
 		observeCh := election.Observe(ctx)
@@ -88,7 +88,7 @@ func (l *Leader) elect(ctx context.Context) {
 		select {
 		case <-session.Done():
 			l.logger.Info("node is no longer the leader", zap.String("node_id", nodeID))
-			l.mgr.SetInService(false)
+			l.mgr.SetToOutOfService()
 			session.Close()
 		case <-ctx.Done():
 			session.Orphan()
