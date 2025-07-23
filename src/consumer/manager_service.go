@@ -1,4 +1,4 @@
-package main
+package consumer
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
-	"github.com/buddhike/pebble/messages"
 	"github.com/buddhike/pebble/primitives"
 	"go.uber.org/zap"
 )
@@ -117,7 +116,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var request messages.AssignRequest
+	var request AssignRequest
 	err = json.Unmarshal(body, &request)
 	if err != nil {
 		m.logger.Error("error unmarshaling assign request", zap.Error(err))
@@ -138,14 +137,14 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	w.Write(res)
 }
 
-func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *messages.AssignResponse {
+func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResponse {
 	now := m.clock()
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
 	status := m.ensureInService()
 	if status.NotInService {
-		return &messages.AssignResponse{Status: status}
+		return &AssignResponse{Status: status}
 	}
 
 	m.releaseInactiveWorkers(now)
@@ -154,7 +153,7 @@ func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *m
 	// If worker has no capacity, don't assign anything
 	// TODO: Review this design
 	if request.MaxShards == 0 {
-		return &messages.AssignResponse{}
+		return &AssignResponse{}
 	}
 
 	oldActiveShardCount := worker.activeShardCount
@@ -218,13 +217,13 @@ func (m *ManagerService) handleAssignRequest(request *messages.AssignRequest) *m
 		}
 	}
 
-	var assignments []messages.Assignment
+	var assignments []Assignment
 	for _, a := range worker.assignments {
 		sn := m.checkpoints[*a.shard.ShardId]
-		assignments = append(assignments, messages.Assignment{ID: a.id, ShardID: *a.shard.ShardId, SequenceNumber: sn})
+		assignments = append(assignments, Assignment{ID: a.id, ShardID: *a.shard.ShardId, SequenceNumber: sn})
 	}
 
-	return &messages.AssignResponse{
+	return &AssignResponse{
 		Assignments: assignments,
 	}
 }
@@ -292,7 +291,7 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var request messages.CheckpointRequest
+	var request CheckpointRequest
 	err = json.Unmarshal(body, &request)
 	if err != nil {
 		m.logger.Error("error unmashaling checkpoint request", zap.Error(err))
@@ -317,19 +316,19 @@ func (m *ManagerService) Checkpoint(w http.ResponseWriter, r *http.Request) {
 	w.Write(res)
 }
 
-func (m *ManagerService) handleCheckpointRequest(request *messages.CheckpointRequest) (*messages.CheckpointResponse, error) {
+func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*CheckpointResponse, error) {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
 	status := m.ensureInService()
 	if status.NotInService {
-		return &messages.CheckpointResponse{Status: status}, nil
+		return &CheckpointResponse{Status: status}, nil
 	}
 
 	worker := m.workers[request.WorkerID]
 	if worker == nil || worker.assignments[request.ShardID] == nil {
 		// Worker doesn't exist, ownership changed
-		return &messages.CheckpointResponse{OwnershipChanged: true}, nil
+		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
 
 	// Store checkpoint in KVS
@@ -345,9 +344,9 @@ func (m *ManagerService) handleCheckpointRequest(request *messages.CheckpointReq
 	// Release the shard is it has been requested
 	assignment := worker.assignments[request.ShardID]
 	if assignment.reassignmentRequest != nil {
-		return &messages.CheckpointResponse{OwnershipChanged: true}, nil
+		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
-	return &messages.CheckpointResponse{}, nil
+	return &CheckpointResponse{}, nil
 }
 
 func (m *ManagerService) Status(w http.ResponseWriter, r *http.Request) {
@@ -359,8 +358,8 @@ func (m *ManagerService) Status(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (m *ManagerService) ensureInService() messages.Status {
-	s := messages.Status{}
+func (m *ManagerService) ensureInService() Status {
+	s := Status{}
 	if !m.inService {
 		s.NotInService = true
 	}
@@ -445,17 +444,17 @@ func (m *ManagerService) State(w http.ResponseWriter, r *http.Request) {
 	w.Write(buf)
 }
 
-func (m *ManagerService) handleStateRequest() *messages.StateResponse {
+func (m *ManagerService) handleStateRequest() *StateResponse {
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
 	now := m.clock()
 	status := m.ensureInService()
 	if status.NotInService {
-		return &messages.StateResponse{Status: status}
+		return &StateResponse{Status: status}
 	}
 
-	shards := make([]messages.ShardState, 0)
+	shards := make([]ShardState, 0)
 	for _, s := range m.shards {
 		var wd *workerInfo
 		for _, v := range m.workers {
@@ -470,15 +469,15 @@ func (m *ManagerService) handleStateRequest() *messages.StateResponse {
 			workerID = wd.workerID
 			lhb = now.Sub(wd.lastHeartbeat).String()
 		}
-		shards = append(shards, messages.ShardState{ShardID: *s.ShardId, WorkerID: workerID, LastHeartbeat: lhb})
+		shards = append(shards, ShardState{ShardID: *s.ShardId, WorkerID: workerID, LastHeartbeat: lhb})
 	}
 
-	workers := make([]messages.WorkerState, 0)
+	workers := make([]WorkerState, 0)
 	for k, w := range m.workers {
-		workers = append(workers, messages.WorkerState{WorkerID: k, NumberOfAssignedShards: w.activeShardCount, AssignmentsLength: len(w.assignments)})
+		workers = append(workers, WorkerState{WorkerID: k, NumberOfAssignedShards: w.activeShardCount, AssignmentsLength: len(w.assignments)})
 	}
 
-	slices.SortFunc(shards, func(a, b messages.ShardState) int {
+	slices.SortFunc(shards, func(a, b ShardState) int {
 		if a.ShardID < b.ShardID {
 			return -1
 		}
@@ -488,7 +487,7 @@ func (m *ManagerService) handleStateRequest() *messages.StateResponse {
 		return 0
 	})
 
-	slices.SortFunc(workers, func(a, b messages.WorkerState) int {
+	slices.SortFunc(workers, func(a, b WorkerState) int {
 		if a.WorkerID < b.WorkerID {
 			return -1
 		}
@@ -498,7 +497,7 @@ func (m *ManagerService) handleStateRequest() *messages.StateResponse {
 		return 0
 	})
 
-	return &messages.StateResponse{
+	return &StateResponse{
 		Shards:  shards,
 		Workers: workers,
 	}

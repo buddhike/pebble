@@ -1,4 +1,4 @@
-package messages
+package consumer
 
 type Status struct {
 	NotInService bool

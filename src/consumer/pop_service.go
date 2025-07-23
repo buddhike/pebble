@@ -1,4 +1,4 @@
-package main
+package consumer
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-type Pop struct {
+type PopService struct {
 	cfg                  *PopConfig
 	kvs                  KVS
 	kds                  aws.Kinesis
@@ -21,7 +21,7 @@ type Pop struct {
 	logger               *zap.Logger
 }
 
-func NewPop(name, streamName string, opts ...func(*PopConfig)) *Pop {
+func NewPopService(name, streamName string, opts ...func(*PopConfig)) *PopService {
 	cfg := PopConfig{
 		PopID:                               1,
 		Name:                                name,
@@ -52,7 +52,7 @@ func NewPop(name, streamName string, opts ...func(*PopConfig)) *Pop {
 		logger = l
 	}
 
-	return &Pop{
+	return &PopService{
 		cfg:                  &cfg,
 		componentsDoneNotify: make(map[string]chan struct{}),
 		stop:                 make(chan struct{}),
@@ -61,7 +61,7 @@ func NewPop(name, streamName string, opts ...func(*PopConfig)) *Pop {
 	}
 }
 
-func (p *Pop) Start() error {
+func (p *PopService) Start() error {
 	cli, err := clientv3.New(clientv3.Config{
 		Endpoints:   p.cfg.GetClientConnectionUrls(),
 		DialTimeout: 5 * time.Second,
@@ -103,7 +103,7 @@ func (p *Pop) Start() error {
 	return nil
 }
 
-func (p *Pop) Stop() {
+func (p *PopService) Stop() {
 	close(p.stop)
 	for k, v := range p.componentsDoneNotify {
 		p.logger.Info("shutdown initiated", zap.String("component", k))
@@ -113,6 +113,6 @@ func (p *Pop) Stop() {
 	close(p.done)
 }
 
-func (p *Pop) Done() <-chan struct{} {
+func (p *PopService) Done() <-chan struct{} {
 	return p.done
 }

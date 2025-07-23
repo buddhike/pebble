@@ -15,13 +15,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
-	"github.com/buddhike/pebble/messages"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
 type shardProcessor struct {
-	Assignment *messages.Assignment
+	Assignment *Assignment
 	Done       chan struct{}
 	Stop       chan struct{}
 }
@@ -78,7 +77,7 @@ func (w *WorkerService) Start() {
 				return
 			default:
 				// Create assign request
-				assignReq := messages.AssignRequest{
+				assignReq := AssignRequest{
 					WorkerID:  w.cfg.ID,
 					MaxShards: w.maxShards,
 				}
@@ -125,7 +124,7 @@ func (w *WorkerService) Start() {
 				}
 
 				// Unmarshal response
-				var assignResp messages.AssignResponse
+				var assignResp AssignResponse
 				err = json.Unmarshal(respBody, &assignResp)
 				if err != nil {
 					w.logger.Info("failed to unmarshal assign response", zap.Error(err), zap.String("assign_response", string(respBody)))
@@ -144,7 +143,7 @@ func (w *WorkerService) Start() {
 
 				// Check if we got any assignments
 				if len(assignResp.Assignments) > 0 {
-					lt := make(map[string]*messages.Assignment)
+					lt := make(map[string]*Assignment)
 					start := make([]*shardProcessor, 0)
 					stop := make([]*shardProcessor, 0)
 					// Evaluate what we need to start
@@ -306,7 +305,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			// Checkpoint after processing records
 			if len(evt.Value.Records) > 0 {
 				lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
-				checkpointReq := messages.CheckpointRequest{
+				checkpointReq := CheckpointRequest{
 					WorkerID:       w.cfg.ID,
 					ShardID:        assignment.ShardID,
 					SequenceNumber: *lastRecord.SequenceNumber,
@@ -331,7 +330,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 					continue
 				}
 
-				var checkpointResp messages.CheckpointResponse
+				var checkpointResp CheckpointResponse
 				err = json.Unmarshal(respBody, &checkpointResp)
 				if err != nil {
 					w.logger.Error("failed to unmarshal checkpoint response: %v", zap.Error(err))

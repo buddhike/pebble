@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/buddhike/pebble/consumer"
 )
 
 var (
@@ -34,7 +36,7 @@ func init() {
 
 func main() {
 	parseArgs()
-	pop := NewPop(name, streamName, WithID(id), WithPopUrls(popUrls), WithPopListenAddress(popListenAddress), WithEtcdPeerUrls(etcdPeerUrls), WithEtcdListenPeerAddress(etcdPeerListenAddress), WithEtcdClientUrls(etcdClientUrls), WithEtcdListenClientAddress(etcdClientListenAddress))
+	pop := consumer.NewPopService(name, streamName, consumer.WithID(id), consumer.WithManagerPopUrls(popUrls), consumer.WithPopListenAddress(popListenAddress), consumer.WithEtcdPeerUrls(etcdPeerUrls), consumer.WithEtcdListenPeerAddress(etcdPeerListenAddress), consumer.WithEtcdClientUrls(etcdClientUrls), consumer.WithEtcdListenClientAddress(etcdClientListenAddress))
 	stopchan := make(chan os.Signal, 1)
 	signal.Notify(stopchan, syscall.SIGTERM, syscall.SIGINT)
 	go func() {

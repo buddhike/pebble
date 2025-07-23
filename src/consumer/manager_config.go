@@ -1,4 +1,4 @@
-package main
+package consumer
 
 import (
 	"fmt"
@@ -140,7 +140,7 @@ func WithEtcdListenClientAddress(addr string) func(*PopConfig) {
 	}
 }
 
-func WithPopUrls(urls string) func(*PopConfig) {
+func WithManagerPopUrls(urls string) func(*PopConfig) {
 	return func(cfg *PopConfig) {
 		cfg.PopUrls = urls
 	}
