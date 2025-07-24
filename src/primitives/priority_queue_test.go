@@ -45,19 +45,19 @@ func TestPriorityQueue_DuplicateUpdate(t *testing.T) {
 	if pq.Pop() != 2 {
 		t.Error("expected 2 after updated item is popped")
 	}
-	if _, ok := pq.Peek(); ok {
+	if _, empty := pq.Peek(); !empty {
 		t.Error("expected queue to be empty after pop")
 	}
 }
 
 func TestPriorityQueue_Peek(t *testing.T) {
 	pq := NewPriorityQueue[int](false)
-	if v, ok := pq.Peek(); ok || v != 0 {
-		t.Error("peek on empty queue should return zero value and false")
+	if v, empty := pq.Peek(); !empty || v != 0 {
+		t.Error("peek on empty queue should return zero value and true")
 	}
 	pq.Push(5, 2.0)
 	pq.Push(6, 1.0)
-	if v, ok := pq.Peek(); !ok || v != 6 {
+	if v, empty := pq.Peek(); empty || v != 6 {
 		t.Errorf("peek: expected 6, got %d", v)
 	}
 }
@@ -225,8 +225,8 @@ func TestPriorityQueue_RemoveAllItems(t *testing.T) {
 		t.Errorf("index map should be empty, got length %d", len(pq.idx))
 	}
 
-	// verify peek returns false
-	if _, ok := pq.Peek(); ok {
-		t.Error("peek should return false for empty queue")
+	// verify peek returns true
+	if _, empty := pq.Peek(); !empty {
+		t.Error("peek should return true for empty queue")
 	}
 }

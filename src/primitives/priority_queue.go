@@ -88,9 +88,9 @@ func (q *PriorityQueue[T]) Peek() (T, bool) {
 	items := q.pq.items
 	if len(items) == 0 {
 		var zero T
-		return zero, false
+		return zero, true
 	}
-	return items[0].value, true
+	return items[0].value, false
 }
 
 func (q *PriorityQueue[T]) Remove(v T) bool {

@@ -19,17 +19,22 @@ import (
 )
 
 type ManagerService struct {
-	mut                  *sync.Mutex
-	inService            bool
-	term                 int64
-	kds                  aws.Kinesis
-	kvs                  KVS
-	cfg                  *PopConfig
-	shards               []types.Shard
-	unassignedShards     []*types.Shard
-	checkpoints          map[string]string
-	done                 chan struct{}
-	stop                 chan struct{}
+	mut              *sync.Mutex
+	inService        bool
+	term             int64
+	kds              aws.Kinesis
+	kvs              KVS
+	cfg              *PopConfig
+	shards           []types.Shard
+	unassignedShards []*types.Shard
+	checkpoints      map[string]string
+	done             chan struct{}
+	stop             chan struct{}
+	// The following fields must always be updated together and only while holding mut:
+	// - workers
+	// - workerHeartbeats
+	// - workerShardCount
+	// Any addition or removal of a worker must update all three atomically under the lock.
 	workers              map[string]*workerInfo
 	workerHeartbeats     *primitives.PriorityQueue[string]
 	workerShardCount     *primitives.PriorityQueue[*workerInfo]
@@ -229,13 +234,17 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 	}
 }
 
-// move shards from workers that have not sent a heartbeat within the timeout back to the unassigned pool
+// Move shards from workers that have not sent a heartbeat within the timeout back to the unassigned pool
 func (m *ManagerService) releaseInactiveWorkers(at time.Time) {
+	// Must update workers, workerHeartbeats, and workerShardCount together under lock
 	releasedSet := make(map[string]struct{})
 	for {
-		leastActiveWorkerID, _ := m.workerHeartbeats.Peek()
+		leastActiveWorkerID, empty := m.workerHeartbeats.Peek()
 		leastActiveWorker := m.workers[leastActiveWorkerID]
-		if leastActiveWorker == nil || at.Sub(leastActiveWorker.lastHeartbeat) < m.cfg.WorkerInactivityTimeout() {
+		if !empty && leastActiveWorker == nil {
+			panic(fmt.Sprintf("workers and workerHeartbeats are out of sync: %s", leastActiveWorkerID))
+		}
+		if empty || at.Sub(leastActiveWorker.lastHeartbeat) < m.cfg.WorkerInactivityTimeout() {
 			break
 		}
 		for _, a := range leastActiveWorker.assignments {
@@ -264,6 +273,7 @@ func (m *ManagerService) releaseInactiveWorkers(at time.Time) {
 }
 
 func (m *ManagerService) resolveActiveWorker(workerID string, at time.Time) *workerInfo {
+	// Must add to workers and workerHeartbeats together under lock
 	worker := m.workers[workerID]
 	if worker == nil {
 		worker = &workerInfo{
