@@ -416,16 +416,14 @@ func (m *ManagerService) SetToInService(term int64) {
 		// Caller can release leadership
 		panic(err)
 	}
-	m.shards = out.Shards
-	m.workers = make(map[string]*workerInfo)
-	m.checkpoints = make(map[string]string)
-	m.workerHeartbeats = primitives.NewPriorityQueue[string](false)
-	m.workerShardCount = primitives.NewPriorityQueue[*workerInfo](true)
 
-	for _, s := range m.shards {
-		m.unassignedShards = append(m.unassignedShards, &s)
+	unassignedShards := make([]*types.Shard, 0)
+	for _, s := range out.Shards {
+		unassignedShards = append(unassignedShards, &s)
 	}
-	for _, s := range m.unassignedShards {
+
+	checkpoints := make(map[string]string)
+	for _, s := range unassignedShards {
 		// ETCD client v3 has built-in retry logic
 		cp, err := m.kvs.Get(context.Background(), *s.ShardId)
 		if err != nil {
@@ -433,15 +431,25 @@ func (m *ManagerService) SetToInService(term int64) {
 			panic(err)
 		}
 		if cp.Count > 0 {
-			m.checkpoints[*s.ShardId] = string(cp.Kvs[0].Value)
+			checkpoints[*s.ShardId] = string(cp.Kvs[0].Value)
 		} else {
-			m.checkpoints[*s.ShardId] = "LATEST"
+			checkpoints[*s.ShardId] = "LATEST"
 		}
 	}
 
+	// Finally update the state and put manager into in service mode
 	m.mut.Lock()
+
+	m.shards = out.Shards
+	m.workers = make(map[string]*workerInfo)
+	m.workerHeartbeats = primitives.NewPriorityQueue[string](false)
+	m.workerShardCount = primitives.NewPriorityQueue[*workerInfo](true)
+	m.unassignedShards = unassignedShards
+	m.checkpoints = checkpoints
+
 	m.inService = true
 	m.term = term
+
 	m.mut.Unlock()
 }
 
