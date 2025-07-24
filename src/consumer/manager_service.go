@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/aws"
+	"github.com/buddhike/pebble/middleware"
 	"github.com/buddhike/pebble/primitives"
 	clientv3 "go.etcd.io/etcd/client/v3"
 	"go.uber.org/zap"
@@ -95,8 +96,8 @@ func (m *ManagerService) Start() error {
 	}
 
 	go func() {
-		http.HandleFunc("/checkpoint/", m.Checkpoint)
-		http.HandleFunc("/assign/", m.Assign)
+		http.HandleFunc("/checkpoint/", middleware.StateCriticalRoute(m.Checkpoint, m.logger))
+		http.HandleFunc("/assign/", middleware.StateCriticalRoute(m.Assign, m.logger))
 		http.HandleFunc("/status/", m.Status)
 		http.HandleFunc("/health/", m.Health)
 		http.HandleFunc("/state/", m.State)
