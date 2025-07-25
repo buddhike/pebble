@@ -37,6 +37,7 @@ type WorkerService struct {
 	mut               *sync.Mutex
 	lastHeartbeatTime time.Time
 	shardProcessors   map[string]*shardProcessor
+	clock             func() time.Time
 }
 
 func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}, logger *zap.Logger) *WorkerService {
@@ -51,6 +52,7 @@ func NewWorker(cfg *ConsumerConfig, kds aws.Kinesis, stop chan struct{}, logger 
 		maxShards:       1,
 		mut:             &sync.Mutex{},
 		shardProcessors: make(map[string]*shardProcessor),
+		clock:           func() time.Time { return time.Now() },
 	}
 }
 
@@ -278,9 +280,11 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 	assignment := p.Assignment
 	eventStream := output.GetStream().Events()
 	sn := ""
+	lastCheckpointTime := w.clock()
 	for {
 		select {
 		case event, ok := <-eventStream:
+
 			if !ok {
 				log.Printf("Event stream closed for shard %s", assignment.ShardID)
 				return true, sn // ok to resubscribe
@@ -297,6 +301,8 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 				return false, ""
 			}
 
+			now := w.clock()
+
 			// Process records
 			for _, record := range evt.Value.Records {
 				w.cfg.ProcessFn(record)
@@ -306,6 +312,9 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			sn := "CLOSED"
 			if evt.Value.ContinuationSequenceNumber != nil {
 				sn = *evt.Value.ContinuationSequenceNumber
+			}
+			if sn != "CLOSED" && now.Sub(lastCheckpointTime) < w.cfg.CheckpointInterval() {
+				continue
 			}
 			checkpointReq := CheckpointRequest{
 				AssignmentID:   assignment.ID,
@@ -351,6 +360,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 				return false, sn
 			}
 
+			lastCheckpointTime = now
 			if sn == "CLOSED" {
 				eventStream = nil
 			}

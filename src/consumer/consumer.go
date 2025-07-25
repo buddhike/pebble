@@ -30,6 +30,7 @@ func MustNewConsumer(name, efoConsumerArn, popUrls string, processFn func(types.
 		PopUrls:                             popUrls,
 		HealthcheckTimeoutMilliseconds:      1000,
 		WorkerInactivityTimeoutMilliseconds: 5000,
+		CheckpointIntervalMilliseconds:      60000,
 	}
 
 	for _, opt := range opts {

@@ -17,6 +17,7 @@ type ConsumerConfig struct {
 	PopUrls                             string
 	HealthcheckTimeoutMilliseconds      int
 	WorkerInactivityTimeoutMilliseconds int
+	CheckpointIntervalMilliseconds      int
 	logger                              *zap.Logger
 }
 
@@ -26,6 +27,10 @@ func (cfg *ConsumerConfig) HealthcheckTimeout() time.Duration {
 
 func (cfg *ConsumerConfig) WorkerInactivityTimeout() time.Duration {
 	return time.Duration(cfg.WorkerInactivityTimeoutMilliseconds) * time.Millisecond
+}
+
+func (cfg *ConsumerConfig) CheckpointInterval() time.Duration {
+	return time.Duration(cfg.CheckpointIntervalMilliseconds) * time.Millisecond
 }
 
 func WithKinesisClient(kds *kinesis.Client) func(*ConsumerConfig) {
@@ -43,5 +48,11 @@ func WithLogger(logger *zap.Logger) func(*ConsumerConfig) {
 func WithPopUrls(urls string) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.PopUrls = urls
+	}
+}
+
+func WithCheckpointInterval(t int) func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.CheckpointIntervalMilliseconds = t
 	}
 }
