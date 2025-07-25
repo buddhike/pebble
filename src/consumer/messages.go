@@ -33,19 +33,18 @@ type AssignResponse struct {
 }
 
 type ShardState struct {
-	ShardID       string
-	WorkerID      string
-	LastHeartbeat string
+	ShardID string
 }
 
 type WorkerState struct {
 	WorkerID               string
 	AssignmentsLength      int
 	NumberOfAssignedShards int
+	Shards                 []ShardState
+	LastHeartbeat          string
 }
 
 type StateResponse struct {
 	Status
-	Shards  []ShardState
 	Workers []WorkerState
 }

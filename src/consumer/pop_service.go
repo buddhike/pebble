@@ -15,6 +15,7 @@ type PopService struct {
 	cfg                  *PopConfig
 	kvs                  KVS
 	kds                  aws.Kinesis
+	discovery            *ShardDiscoveryService
 	stop                 chan struct{}
 	done                 chan struct{}
 	componentsDoneNotify map[string]chan struct{}
@@ -83,7 +84,11 @@ func (p *PopService) Start() error {
 		p.kds = p.cfg.KinesisClient
 	}
 
-	mgr := NewManagerService(p.cfg, p.kds, p.kvs, p.stop, p.logger)
+	p.discovery = NewShardDiscoveryService(p.cfg, p.kds, p.stop, p.logger)
+	p.discovery.Start()
+	p.componentsDoneNotify["ShardDiscoveryService"] = p.discovery.done
+
+	mgr := NewManagerService(p.cfg, p.kds, p.kvs, p.discovery, p.stop, p.logger)
 	err = mgr.Start()
 	if err != nil {
 		return err

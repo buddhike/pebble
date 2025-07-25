@@ -26,6 +26,7 @@ type PopConfig struct {
 	WorkerInactivityTimeoutMilliseconds int
 	ShardReleaseTimeoutMilliseconds     int
 	EtcdStartTimeoutSeconds             int
+	ShardDiscoveryIntervalSeconds       int
 	logger                              *zap.Logger
 }
 
@@ -122,6 +123,10 @@ func (cfg *PopConfig) HealthcheckTimeout() time.Duration {
 	return time.Duration(cfg.HealthcheckTimeoutMilliseconds) * time.Millisecond
 }
 
+func (cfg *PopConfig) ShardDiscoveryInterval() time.Duration {
+	return time.Duration(cfg.ShardDiscoveryIntervalSeconds) * time.Second
+}
+
 func WithPopListenAddress(addr string) func(*PopConfig) {
 	return func(cfg *PopConfig) {
 		cfg.PopListenAddress = addr
@@ -191,5 +196,11 @@ func WithEtcdStartTimeoutSeconds(timeout int) func(*PopConfig) {
 func WithManagerLogger(logger *zap.Logger) func(*PopConfig) {
 	return func(cfg *PopConfig) {
 		cfg.logger = logger
+	}
+}
+
+func WithShardDiscoveryIntervalSeconds(seconds int) func(*PopConfig) {
+	return func(cfg *PopConfig) {
+		cfg.ShardDiscoveryIntervalSeconds = seconds
 	}
 }

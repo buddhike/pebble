@@ -303,55 +303,59 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			}
 
 			// Checkpoint after processing records
-			if len(evt.Value.Records) > 0 {
-				lastRecord := evt.Value.Records[len(evt.Value.Records)-1]
-				checkpointReq := CheckpointRequest{
-					AssignmentID:   assignment.ID,
-					WorkerID:       w.cfg.ID,
-					ShardID:        assignment.ShardID,
-					SequenceNumber: *lastRecord.SequenceNumber,
-				}
-
-				reqBody, err := json.Marshal(checkpointReq)
-				if err != nil {
-					w.logger.Error("failed to marshal checkpoint request", zap.Error(err))
-					continue
-				}
-
-				resp, err := http.Post(fmt.Sprintf("%s/checkpoint/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
-				if err != nil {
-					w.logger.Error("failed to send checkpoint request", zap.Error(err))
-					continue
-				}
-
-				respBody, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					w.logger.Error("failed to read checkpoint response: %v", zap.Error(err))
-					continue
-				}
-
-				var checkpointResp CheckpointResponse
-				err = json.Unmarshal(respBody, &checkpointResp)
-				if err != nil {
-					w.logger.Error("failed to unmarshal checkpoint response: %v", zap.Error(err))
-					continue
-				}
-
-				if checkpointResp.OwnershipChanged {
-					w.logger.Info("ownership changed", zap.String("ShardID", assignment.ShardID))
-					eventStream = nil
-					break
-				}
-
-				if checkpointResp.NotInService {
-					w.logger.Info("manager not in service, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
-					return false, sn
-				}
-
-				sn = *lastRecord.SequenceNumber
-				w.logger.Info("successfully checkpointed shard", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", *lastRecord.SequenceNumber))
+			sn := "CLOSED"
+			if evt.Value.ContinuationSequenceNumber != nil {
+				sn = *evt.Value.ContinuationSequenceNumber
 			}
+			checkpointReq := CheckpointRequest{
+				AssignmentID:   assignment.ID,
+				WorkerID:       w.cfg.ID,
+				ShardID:        assignment.ShardID,
+				SequenceNumber: sn,
+			}
+
+			reqBody, err := json.Marshal(checkpointReq)
+			if err != nil {
+				w.logger.Error("failed to marshal checkpoint request", zap.Error(err))
+				continue
+			}
+
+			resp, err := http.Post(fmt.Sprintf("%s/checkpoint/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
+			if err != nil {
+				w.logger.Error("failed to send checkpoint request", zap.Error(err))
+				continue
+			}
+
+			respBody, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				w.logger.Error("failed to read checkpoint response: %v", zap.Error(err))
+				continue
+			}
+
+			var checkpointResp CheckpointResponse
+			err = json.Unmarshal(respBody, &checkpointResp)
+			if err != nil {
+				w.logger.Error("failed to unmarshal checkpoint response: %v", zap.Error(err))
+				continue
+			}
+
+			if checkpointResp.OwnershipChanged {
+				w.logger.Info("ownership changed", zap.String("ShardID", assignment.ShardID))
+				eventStream = nil
+				break
+			}
+
+			if checkpointResp.NotInService {
+				w.logger.Info("manager not in service, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
+				return false, sn
+			}
+
+			if sn == "CLOSED" {
+				eventStream = nil
+			}
+
+			w.logger.Info("successfully checkpointed shard", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", sn))
 		case <-p.Stop:
 			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
 			return false, ""
