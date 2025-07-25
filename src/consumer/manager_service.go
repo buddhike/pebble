@@ -433,14 +433,8 @@ func (m *ManagerService) ensureCheckpointOwnership(request *CheckpointRequest) *
 		return &CheckpointResponse{Status: status}
 	}
 	worker := m.workers[request.WorkerID]
-	if worker == nil {
-		// Worker doesn't exist
-		return &CheckpointResponse{OwnershipChanged: true}
-	}
-
-	assignment := worker.assignments[request.ShardID]
-	if assignment == nil || assignment.id != request.AssignmentID {
-		// Assignment doesn't exist or ownership changed
+	if worker == nil || worker.assignments[request.ShardID] == nil || worker.assignments[request.ShardID].id != request.AssignmentID {
+		// Worker doesn't exist, ownership changed
 		return &CheckpointResponse{OwnershipChanged: true}
 	}
 	return nil
