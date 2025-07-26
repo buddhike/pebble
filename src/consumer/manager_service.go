@@ -27,6 +27,7 @@ type ManagerService struct {
 	discovery        shardDiscovery
 	cfg              *PopConfig
 	unassignedShards []*types.Shard
+	liveShards       map[string]*types.Shard
 	checkpoints      map[string]string
 	closed           []*closeNotification
 	done             chan struct{}
@@ -39,7 +40,6 @@ type ManagerService struct {
 	workers              map[string]*workerInfo
 	workerHeartbeats     *primitives.PriorityQueue[string]
 	workerShardCount     *primitives.PriorityQueue[*workerInfo]
-	liveShardCount       int
 	logger               *zap.Logger
 	clock                func() time.Time
 	nextAssignmentOffset int64
@@ -91,6 +91,7 @@ func NewManagerService(cfg *PopConfig, kds aws.Kinesis, kvs KVS, shardDiscovery 
 		done:             make(chan struct{}),
 		stop:             stop,
 		workers:          make(map[string]*workerInfo),
+		liveShards:       make(map[string]*types.Shard),
 		workerHeartbeats: primitives.NewPriorityQueue[string](false),
 		workerShardCount: primitives.NewPriorityQueue[*workerInfo](true),
 		logger:           logger.Named("managerservice").With(zap.Int("managerid", cfg.PopID)),
@@ -205,7 +206,7 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 	// if no shards were assigned in this round, attempt to rebalance by stealing shards from overloaded workers
 	if oldActiveShardCount == worker.activeShardCount && worker.reassignmentOffer == nil {
 		// attempt to rebalance shards by redistributing from overloaded workers to this worker, aiming for an even shard distribution
-		ideal := m.liveShardCount / len(m.workers)
+		ideal := len(m.liveShards) / len(m.workers)
 		target := ideal - worker.activeShardCount
 		target = max(target, 0)
 		if target > 0 {
@@ -299,9 +300,9 @@ func (m *ManagerService) processClosedShards() {
 		m.closed = m.closed[1:]
 		if n.worker != nil {
 			delete(n.worker.assignments, n.ShardID)
+			delete(m.liveShards, n.ShardID)
 			n.worker.activeShardCount--
 			m.workerShardCount.Push(n.worker, float64(n.worker.activeShardCount))
-			m.liveShardCount--
 			// Clear the worker so that in case n is unresolved,
 			// we would not try adjust state more than once
 			n.worker = nil
@@ -316,12 +317,12 @@ func (m *ManagerService) processClosedShards() {
 		for _, child := range children {
 			if m.checkpoints[*child.ParentShardId] == "CLOSED" && (child.AdjacentParentShardId == nil || m.checkpoints[*child.AdjacentParentShardId] == "CLOSED") {
 				childCheckpoint := m.checkpoints[*child.ShardId]
-				if childCheckpoint != "CLOSED" {
+				if childCheckpoint != "CLOSED" && m.liveShards[*child.ShardId] == nil {
 					if childCheckpoint == "" {
 						m.checkpoints[*child.ShardId] = "LATEST"
 					}
 					m.unassignedShards = append(m.unassignedShards, child)
-					m.liveShardCount++
+					m.liveShards[*child.ShardId] = child
 				} else {
 					m.closed = append(m.closed, &closeNotification{ShardID: *child.ShardId})
 				}
@@ -489,13 +490,18 @@ func (m *ManagerService) SetToInService(term int64) {
 		} else {
 			checkpoints[*shard.ShardId] = "LATEST"
 		}
+		m.logger.Info("checkpoint initialised", zap.String("shard-id", *shard.ShardId), zap.String("sequence-number", checkpoints[*shard.ShardId]))
 	}
 
 	roots := m.discovery.GetRoots()
+	liveShards := make(map[string]*types.Shard)
 	for _, root := range roots {
 		if checkpoints[*root.ShardId] != "CLOSED" {
+			m.logger.Info("unassigned root", zap.String("shard-id", *root.ShardId))
 			unassignedShards = append(unassignedShards, root)
+			liveShards[*root.ShardId] = root
 		} else {
+			m.logger.Info("closed root", zap.String("shard-id", *root.ShardId))
 			closed = append(closed, &closeNotification{ShardID: *root.ShardId})
 		}
 	}
@@ -508,8 +514,8 @@ func (m *ManagerService) SetToInService(term int64) {
 	m.workerShardCount = primitives.NewPriorityQueue[*workerInfo](true)
 	m.unassignedShards = unassignedShards
 	m.checkpoints = checkpoints
-	m.liveShardCount = len(unassignedShards)
 	m.closed = closed
+	m.liveShards = liveShards
 
 	m.inService = true
 	m.term = term
