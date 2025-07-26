@@ -228,7 +228,14 @@ func (w *WorkerService) processShard(p *shardProcessor) {
 	okToSubscribe := true
 	assignment := p.Assignment
 
+	if assignment.SequenceNumber == "" {
+		panic("assignment with an empty sequence number")
+	}
+
 	for okToSubscribe {
+		if sequenceNumber == "CLOSED" {
+			panic("closed shard must never be assigned")
+		}
 		// Determine starting position for subscription
 		var startingPosition types.StartingPosition
 		if sequenceNumber != "" {
@@ -267,7 +274,7 @@ func (w *WorkerService) processShard(p *shardProcessor) {
 			}
 			output, err := w.kds.SubscribeToShard(context.Background(), subscribeInput)
 			if err != nil {
-				w.logger.Info("failed to subscribe to shard", zap.String("shard-id", assignment.ShardID), zap.Error(err))
+				w.logger.Info("failed to subscribe to shard", zap.String("shard-id", assignment.ShardID), zap.String("sequence-number", *startingPosition.SequenceNumber), zap.Error(err))
 				continue
 			}
 			// Process events from the subscription with stop signal handling
@@ -309,10 +316,12 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			}
 
 			// Checkpoint after processing records
-			sn := "CLOSED"
 			if evt.Value.ContinuationSequenceNumber != nil {
 				sn = *evt.Value.ContinuationSequenceNumber
+			} else {
+				sn = "CLOSED"
 			}
+
 			if sn != "CLOSED" && now.Sub(lastCheckpointTime) < w.cfg.CheckpointInterval() {
 				continue
 			}
@@ -355,16 +364,17 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 				break
 			}
 
+			if sn == "CLOSED" {
+				eventStream = nil
+				break
+			}
+
 			if checkpointResp.NotInService {
 				w.logger.Info("manager not in service, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
 				return false, sn
 			}
 
 			lastCheckpointTime = now
-			if sn == "CLOSED" {
-				eventStream = nil
-			}
-
 			w.logger.Info("successfully checkpointed shard", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", sn))
 		case <-p.Stop:
 			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
