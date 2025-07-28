@@ -12,11 +12,13 @@ import (
 )
 
 var (
+	streamName        string
 	streamConsumerArn string
 	popUrls           string
 )
 
 func init() {
+	flag.StringVar(&streamName, "stream-name", "", "Stream name")
 	flag.StringVar(&streamConsumerArn, "stream-consumer-arn", "", "EFO consumer ARN")
 	flag.StringVar(&popUrls, "pop-urls", "", "POP urls")
 }
@@ -28,7 +30,7 @@ func main() {
 		fmt.Printf("Processing record: %s\n", *record.PartitionKey)
 	}
 
-	c := consumer.MustNewConsumer("my-consumer", streamConsumerArn, popUrls, processFn)
+	c := consumer.MustNewStandaloneConsumer("my-consumer", streamName, streamConsumerArn, processFn)
 
 	// Start the consumer
 	err := c.Start()

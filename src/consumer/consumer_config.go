@@ -10,6 +10,7 @@ import (
 
 type ConsumerConfig struct {
 	ID                                  string
+	StreamName                          string
 	EfoConsumerArn                      string
 	ProcessFn                           func(types.Record)
 	Name                                string
@@ -18,6 +19,7 @@ type ConsumerConfig struct {
 	HealthcheckTimeoutMilliseconds      int
 	WorkerInactivityTimeoutMilliseconds int
 	CheckpointIntervalMilliseconds      int
+	StandaloneConsumer                  bool
 	logger                              *zap.Logger
 }
 
@@ -54,5 +56,11 @@ func WithPopUrls(urls string) func(*ConsumerConfig) {
 func WithCheckpointInterval(t int) func(*ConsumerConfig) {
 	return func(cfg *ConsumerConfig) {
 		cfg.CheckpointIntervalMilliseconds = t
+	}
+}
+
+func AsStandalone() func(*ConsumerConfig) {
+	return func(cfg *ConsumerConfig) {
+		cfg.StandaloneConsumer = true
 	}
 }
