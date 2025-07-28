@@ -229,18 +229,18 @@ func (w *WorkerService) processShard(p *shardProcessor) {
 	assignment := p.Assignment
 
 	if assignment.SequenceNumber == "" {
-		panic("assignment with an empty sequence number")
+		w.logger.Fatal("assignment with an empty sequence number", zap.String("shard-id", assignment.ShardID))
 	}
 
 	for okToSubscribe {
 		if sequenceNumber == "CLOSED" {
-			panic("closed shard must never be assigned")
+			w.logger.Fatal("worker must not continue or assigned after shard is closed", zap.String("shard-id", assignment.ShardID))
 		}
 		// Determine starting position for subscription
 		var startingPosition types.StartingPosition
 		if sequenceNumber != "" {
 			startingPosition = types.StartingPosition{
-				Type:           types.ShardIteratorTypeAtSequenceNumber,
+				Type:           types.ShardIteratorTypeAfterSequenceNumber,
 				SequenceNumber: &sequenceNumber,
 			}
 		} else if assignment.SequenceNumber == "LATEST" {
@@ -249,7 +249,7 @@ func (w *WorkerService) processShard(p *shardProcessor) {
 			}
 		} else {
 			startingPosition = types.StartingPosition{
-				Type:           types.ShardIteratorTypeAtSequenceNumber,
+				Type:           types.ShardIteratorTypeAfterSequenceNumber,
 				SequenceNumber: &assignment.SequenceNumber,
 			}
 		}
@@ -320,6 +320,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 				sn = *evt.Value.ContinuationSequenceNumber
 			} else {
 				sn = "CLOSED"
+				w.logger.Info("shard closed", zap.String("shard-id", assignment.ShardID))
 			}
 
 			if sn != "CLOSED" && now.Sub(lastCheckpointTime) < w.cfg.CheckpointInterval() {
@@ -365,6 +366,7 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			}
 
 			if sn == "CLOSED" {
+				w.logger.Info("shard closed", zap.String("shard-id", assignment.ShardID))
 				eventStream = nil
 				break
 			}
