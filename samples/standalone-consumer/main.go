@@ -14,13 +14,11 @@ import (
 var (
 	streamName        string
 	streamConsumerArn string
-	popUrls           string
 )
 
 func init() {
 	flag.StringVar(&streamName, "stream-name", "", "Stream name")
 	flag.StringVar(&streamConsumerArn, "stream-consumer-arn", "", "EFO consumer ARN")
-	flag.StringVar(&popUrls, "pop-urls", "", "POP urls")
 }
 
 func main() {

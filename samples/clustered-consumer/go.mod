@@ -1,8 +1,8 @@
-module sample
+module clustered-consumer
 
 go 1.23.4
 
-replace github.com/buddhike/pebble => ../src
+replace github.com/buddhike/pebble => ../../src
 
 require (
 	github.com/aws/aws-sdk-go-v2/service/kinesis v1.35.3
