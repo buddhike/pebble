@@ -159,7 +159,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResponse {
-	now := m.clock()
+	currentTime := m.clock()
 	m.mut.Lock()
 	defer m.mut.Unlock()
 
@@ -168,9 +168,9 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 		return &AssignResponse{Status: status}
 	}
 
-	m.releaseInactiveWorkers(now)
+	m.releaseInactiveWorkers(currentTime)
 	m.processClosedShards()
-	worker := m.resolveActiveWorker(request.WorkerID, now)
+	worker := m.resolveActiveWorker(request.WorkerID, currentTime)
 
 	// If worker has no capacity, don't assign anything
 	// TODO: Review this design
@@ -181,7 +181,7 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 	oldActiveShardCount := worker.activeShardCount
 	// Process due reassignment offers
 	noOfReassignments := 0
-	if worker.reassignmentOffer != nil && now.Sub(worker.reassignmentOffer.createdAt) >= m.cfg.ShardReleaseTimeout() {
+	if worker.reassignmentOffer != nil && currentTime.Sub(worker.reassignmentOffer.createdAt) >= m.cfg.ShardReleaseTimeout() {
 		for oldWorker, shards := range worker.reassignmentOffer.shards {
 			for _, shard := range shards {
 				delete(oldWorker.assignments, *shard.ShardId)
@@ -205,38 +205,7 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 
 	// if no shards were assigned in this round, attempt to rebalance by stealing shards from overloaded workers
 	if oldActiveShardCount == worker.activeShardCount && worker.reassignmentOffer == nil {
-		// attempt to rebalance shards by redistributing from overloaded workers to this worker, aiming for an even shard distribution
-		ideal := len(m.liveShards) / len(m.workers)
-		target := ideal - worker.activeShardCount
-		target = max(target, 0)
-		if target > 0 {
-			m.logger.Info("reassigning", zap.String("worker", worker.workerID), zap.Int("ideal", ideal), zap.Int("target", target))
-		}
-		ro := &reassignmentOffer{
-			shards:    make(map[*workerInfo][]*types.Shard),
-			createdAt: now,
-		}
-		for target != 0 {
-			// stop if there are no eligible workers to steal from, if the worker with the most shards is the requester,
-			// or if the worker with the most shards does not exceed the ideal count (nothing to steal)
-			w, _ := m.workerShardCount.Peek()
-			if w == nil || w.workerID == request.WorkerID || w.activeShardCount <= ideal {
-				break
-			}
-			for _, v := range w.assignments {
-				if v.reassignmentRequest == nil {
-					v.reassignmentRequest = &reassignmentRequest{createdAt: time.Now(), shardState: v}
-					ro.shards[w] = append(ro.shards[w], v.shard)
-					target--
-					w.activeShardCount--
-					m.workerShardCount.Push(w, float64(w.activeShardCount))
-					break
-				}
-			}
-		}
-		if len(ro.shards) > 0 {
-			worker.reassignmentOffer = ro
-		}
+		m.rebalance(worker, currentTime)
 	}
 
 	var assignments []Assignment
@@ -330,6 +299,41 @@ func (m *ManagerService) processClosedShards() {
 		}
 	}
 	m.closed = unresolved
+}
+
+func (m *ManagerService) rebalance(worker *workerInfo, now time.Time) {
+	// attempt to rebalance shards by redistributing from overloaded workers to this worker, aiming for an even shard distribution
+	ideal := len(m.liveShards) / len(m.workers)
+	target := ideal - worker.activeShardCount
+	target = max(target, 0)
+	if target > 0 {
+		m.logger.Info("reassigning", zap.String("worker", worker.workerID), zap.Int("ideal", ideal), zap.Int("target", target))
+	}
+	ro := &reassignmentOffer{
+		shards:    make(map[*workerInfo][]*types.Shard),
+		createdAt: now,
+	}
+	for target != 0 {
+		// stop if there are no eligible workers to steal from, if the worker with the most shards is the requester,
+		// or if the worker with the most shards does not exceed the ideal count (nothing to steal)
+		w, _ := m.workerShardCount.Peek()
+		if w == nil || w.workerID == worker.workerID || w.activeShardCount <= ideal {
+			break
+		}
+		for _, v := range w.assignments {
+			if v.reassignmentRequest == nil {
+				v.reassignmentRequest = &reassignmentRequest{createdAt: time.Now(), shardState: v}
+				ro.shards[w] = append(ro.shards[w], v.shard)
+				target--
+				w.activeShardCount--
+				m.workerShardCount.Push(w, float64(w.activeShardCount))
+				break
+			}
+		}
+	}
+	if len(ro.shards) > 0 {
+		worker.reassignmentOffer = ro
+	}
 }
 
 func (m *ManagerService) resolveActiveWorker(workerID string, at time.Time) *workerInfo {
@@ -429,6 +433,7 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 	// Worker owns the shard, update checkpoint
 	m.checkpoints[request.ShardID] = request.SequenceNumber
 	if request.SequenceNumber == "CLOSED" {
+		m.logger.Info("shard closed notification received", zap.String("shard-id", request.ShardID))
 		m.closed = append(m.closed, &closeNotification{ShardID: request.ShardID, worker: worker})
 	}
 
