@@ -2,9 +2,6 @@ package consumer
 
 import (
 	"context"
-	"fmt"
-	"maps"
-	"slices"
 	"sync"
 	"time"
 
@@ -16,8 +13,8 @@ import (
 
 type shard struct {
 	Shard    *types.Shard
-	parents  map[string]*shard
-	children map[string]*shard
+	Parents  map[string]*shard
+	Children map[string]*shard
 }
 
 type ShardDiscoveryService struct {
@@ -89,37 +86,29 @@ func (svc *ShardDiscoveryService) discoverOnce() error {
 	svc.mut.Lock()
 	defer svc.mut.Unlock()
 
-	unresolvedParents := make(map[string]struct{})
 	for _, ks := range shards {
 		s := svc.shards[*ks.ShardId]
 		if s == nil {
-			s = &shard{Shard: ks, parents: make(map[string]*shard), children: make(map[string]*shard)}
+			s = &shard{Shard: ks, Parents: make(map[string]*shard), Children: make(map[string]*shard)}
 			svc.shards[*ks.ShardId] = s
 		}
 		s.Shard = ks
 		if ks.ParentShardId != nil {
 			p := svc.shards[*ks.ParentShardId]
 			if p == nil {
-				p = &shard{}
-				unresolvedParents[*ks.ParentShardId] = struct{}{}
+				p = &shard{Parents: make(map[string]*shard), Children: make(map[string]*shard)}
 			}
-			s.parents[*ks.ParentShardId] = p
-			p.children[*ks.ShardId] = s
+			s.Parents[*ks.ParentShardId] = p
+			p.Children[*ks.ShardId] = s
 		}
 		if ks.AdjacentParentShardId != nil {
 			p := svc.shards[*ks.AdjacentParentShardId]
 			if p == nil {
-				p = &shard{}
-				unresolvedParents[*ks.AdjacentParentShardId] = struct{}{}
+				p = &shard{Parents: make(map[string]*shard), Children: make(map[string]*shard)}
 			}
-			s.parents[*ks.AdjacentParentShardId] = p
-			p.children[*ks.ShardId] = s
+			s.Parents[*ks.AdjacentParentShardId] = p
+			p.Children[*ks.ShardId] = s
 		}
-		delete(unresolvedParents, *ks.ShardId)
-	}
-	if len(unresolvedParents) > 0 {
-		u := slices.Collect(maps.Values(unresolvedParents))
-		panic(fmt.Sprintf("parents shards for following shards were not found: %v", u))
 	}
 
 	return nil
@@ -156,7 +145,9 @@ func (svc *ShardDiscoveryService) GetAll() []*types.Shard {
 	defer svc.mut.Unlock()
 	var r []*types.Shard
 	for _, v := range svc.shards {
-		r = append(r, v.Shard)
+		if v.Shard != nil {
+			r = append(r, v.Shard)
+		}
 	}
 	return r
 }
@@ -167,7 +158,7 @@ func (svc *ShardDiscoveryService) GetRoots() []*types.Shard {
 	defer svc.mut.Unlock()
 	var r []*types.Shard
 	for _, v := range svc.shards {
-		if v.Shard.ParentShardId == nil || svc.shards[*v.Shard.ParentShardId] == nil {
+		if v.Shard.ParentShardId == nil || svc.shards[*v.Shard.ParentShardId] == nil || svc.shards[*v.Shard.ParentShardId].Shard == nil {
 			r = append(r, v.Shard)
 		}
 	}
@@ -181,7 +172,7 @@ func (svc *ShardDiscoveryService) GetChildren(shardID string) []*types.Shard {
 
 	s := svc.shards[shardID]
 	var r []*types.Shard
-	for _, shard := range s.children {
+	for _, shard := range s.Children {
 		r = append(r, shard.Shard)
 	}
 	return r
