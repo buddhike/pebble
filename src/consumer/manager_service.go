@@ -3,6 +3,7 @@ package consumer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -47,33 +48,33 @@ type shardDiscovery interface {
 }
 
 type reassignmentOffer struct {
-	shards    map[*workerInfo][]*types.Shard
-	createdAt time.Time
+	Shards    map[*workerInfo][]*types.Shard
+	CreatedAt time.Time
 }
 
 type workerInfo struct {
-	workerID          string
-	lastHeartbeat     time.Time
-	assignments       map[string]*assignment
-	reassignmentOffer *reassignmentOffer
-	activeShardCount  int
+	WorkerID          string
+	LastHeartbeat     time.Time
+	Assignments       map[string]*assignment
+	ReassignmentOffer *reassignmentOffer
+	ActiveShardCount  int
 }
 
 type assignment struct {
-	id                  int64
-	shard               *types.Shard
-	reassignmentRequest *reassignmentRequest
-	worker              *workerInfo
+	ID                  int64
+	Shard               *types.Shard
+	ReassignmentRequest *reassignmentRequest
+	Worker              *workerInfo
 }
 
 type reassignmentRequest struct {
-	createdAt  time.Time
-	shardState *assignment
+	CreatedAt  time.Time
+	ShardState *assignment
 }
 
 type closeNotification struct {
 	ShardID string
-	worker  *workerInfo
+	Worker  *workerInfo
 }
 
 func NewManagerService(cfg *PopConfig, kds aws.Kinesis, kvs KVS, shardDiscovery shardDiscovery, stop chan struct{}, logger *zap.Logger) *ManagerService {
@@ -171,24 +172,24 @@ func (m *ManagerService) assignOnce(request *AssignRequest) *AssignResponse {
 		return &AssignResponse{}
 	}
 
-	oldActiveShardCount := worker.activeShardCount
+	oldActiveShardCount := worker.ActiveShardCount
 	noOfReassignments := m.acquireDueReassignments(worker, currentTime)
 
 	// Fulfill any additional capacity using unassigned pool
 	remaining := max(request.MaxShards-noOfReassignments, 0)
 	count := min(remaining, len(m.unassignedShards))
 	m.assignFromUnassignedPool(count, worker)
-	m.workerShardCount.Push(worker, float64(worker.activeShardCount))
+	m.workerShardCount.Push(worker, float64(worker.ActiveShardCount))
 
 	// if no shards were assigned in this round, attempt to rebalance by stealing shards from overloaded workers
-	if oldActiveShardCount == worker.activeShardCount && worker.reassignmentOffer == nil {
+	if oldActiveShardCount == worker.ActiveShardCount && worker.ReassignmentOffer == nil {
 		m.rebalance(worker, currentTime)
 	}
 
 	var assignments []Assignment
-	for _, a := range worker.assignments {
-		sn := m.checkpoints[*a.shard.ShardId]
-		assignments = append(assignments, Assignment{ID: a.id, ShardID: *a.shard.ShardId, SequenceNumber: sn})
+	for _, a := range worker.Assignments {
+		sn := m.checkpoints[*a.Shard.ShardId]
+		assignments = append(assignments, Assignment{ID: a.ID, ShardID: *a.Shard.ShardId, SequenceNumber: sn})
 	}
 
 	return &AssignResponse{
@@ -206,23 +207,23 @@ func (m *ManagerService) releaseInactiveWorkers(at time.Time) {
 		if !empty && leastActiveWorker == nil {
 			panic(fmt.Sprintf("workers and workerHeartbeats are out of sync: %s", leastActiveWorkerID))
 		}
-		if empty || at.Sub(leastActiveWorker.lastHeartbeat) < m.cfg.WorkerInactivityTimeout() {
+		if empty || at.Sub(leastActiveWorker.LastHeartbeat) < m.cfg.WorkerInactivityTimeout() {
 			break
 		}
 		// Move shards assigned to this worker back to unassigned pool
 		// Skip if there's a re-assignment request because reassignment
 		// will capture the shard
-		for _, a := range leastActiveWorker.assignments {
-			_, released := releasedSet[*a.shard.ShardId]
-			if a.reassignmentRequest == nil && !released {
-				m.unassignedShards = append(m.unassignedShards, a.shard)
-				releasedSet[*a.shard.ShardId] = struct{}{}
+		for _, a := range leastActiveWorker.Assignments {
+			_, released := releasedSet[*a.Shard.ShardId]
+			if a.ReassignmentRequest == nil && !released {
+				m.unassignedShards = append(m.unassignedShards, a.Shard)
+				releasedSet[*a.Shard.ShardId] = struct{}{}
 			}
 		}
 		// Move any shards offerred as part of a reassignment offer
 		// back to unassigned pool
-		if leastActiveWorker.reassignmentOffer != nil {
-			for _, shards := range leastActiveWorker.reassignmentOffer.shards {
+		if leastActiveWorker.ReassignmentOffer != nil {
+			for _, shards := range leastActiveWorker.ReassignmentOffer.Shards {
 				for _, s := range shards {
 					_, released := releasedSet[*s.ShardId]
 					if !released {
@@ -244,14 +245,14 @@ func (m *ManagerService) processClosedShards() {
 	for len(m.closed) > 0 {
 		n := m.closed[0]
 		m.closed = m.closed[1:]
-		if n.worker != nil {
-			delete(n.worker.assignments, n.ShardID)
+		if n.Worker != nil {
+			delete(n.Worker.Assignments, n.ShardID)
 			delete(m.liveShards, n.ShardID)
-			n.worker.activeShardCount--
-			m.workerShardCount.Push(n.worker, float64(n.worker.activeShardCount))
+			n.Worker.ActiveShardCount--
+			m.workerShardCount.Push(n.Worker, float64(n.Worker.ActiveShardCount))
 			// Clear the worker so that in case n is unresolved,
 			// we would not try adjust state more than once
-			n.worker = nil
+			n.Worker = nil
 		}
 		children := m.discovery.GetChildren(n.ShardID)
 		if len(children) == 0 {
@@ -283,36 +284,36 @@ func (m *ManagerService) resolveActiveWorker(workerID string, at time.Time) *wor
 	worker := m.workers[workerID]
 	if worker == nil {
 		worker = &workerInfo{
-			workerID:    workerID,
-			assignments: make(map[string]*assignment),
+			WorkerID:    workerID,
+			Assignments: make(map[string]*assignment),
 		}
 		m.workers[workerID] = worker
 	}
-	worker.lastHeartbeat = at
-	m.workerHeartbeats.Push(workerID, float64(worker.lastHeartbeat.UnixMilli()))
+	worker.LastHeartbeat = at
+	m.workerHeartbeats.Push(workerID, float64(worker.LastHeartbeat.UnixMilli()))
 	return worker
 }
 
 func (m *ManagerService) acquireDueReassignments(worker *workerInfo, currentTime time.Time) int {
 	noOfReassignments := 0
-	if worker.reassignmentOffer != nil && currentTime.Sub(worker.reassignmentOffer.createdAt) >= m.cfg.ShardReleaseTimeout() {
-		for oldWorker, shards := range worker.reassignmentOffer.shards {
+	if worker.ReassignmentOffer != nil && currentTime.Sub(worker.ReassignmentOffer.CreatedAt) >= m.cfg.ShardReleaseTimeout() {
+		for oldWorker, shards := range worker.ReassignmentOffer.Shards {
 			for _, shard := range shards {
-				delete(oldWorker.assignments, *shard.ShardId)
-				worker.assignments[*shard.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: shard, worker: worker}
-				worker.activeShardCount++
+				delete(oldWorker.Assignments, *shard.ShardId)
+				worker.Assignments[*shard.ShardId] = &assignment{ID: m.getNextAssignmentID(), Shard: shard, Worker: worker}
+				worker.ActiveShardCount++
 				noOfReassignments++
 			}
 		}
-		worker.reassignmentOffer = nil
+		worker.ReassignmentOffer = nil
 	}
 	return noOfReassignments
 }
 
 func (m *ManagerService) assignFromUnassignedPool(count int, worker *workerInfo) {
 	for _, s := range m.unassignedShards[0:count] {
-		worker.assignments[*s.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: s, worker: worker}
-		worker.activeShardCount++
+		worker.Assignments[*s.ShardId] = &assignment{ID: m.getNextAssignmentID(), Shard: s, Worker: worker}
+		worker.ActiveShardCount++
 	}
 	m.unassignedShards = m.unassignedShards[count:]
 }
@@ -320,35 +321,35 @@ func (m *ManagerService) assignFromUnassignedPool(count int, worker *workerInfo)
 func (m *ManagerService) rebalance(worker *workerInfo, now time.Time) {
 	// attempt to rebalance shards by redistributing from overloaded workers to this worker, aiming for an even shard distribution
 	ideal := len(m.liveShards) / len(m.workers)
-	target := ideal - worker.activeShardCount
+	target := ideal - worker.ActiveShardCount
 	target = max(target, 0)
 	if target > 0 {
-		m.logger.Info("reassigning", zap.String("worker", worker.workerID), zap.Int("ideal", ideal), zap.Int("target", target))
+		m.logger.Info("reassigning", zap.String("worker", worker.WorkerID), zap.Int("ideal", ideal), zap.Int("target", target))
 	}
 	ro := &reassignmentOffer{
-		shards:    make(map[*workerInfo][]*types.Shard),
-		createdAt: now,
+		Shards:    make(map[*workerInfo][]*types.Shard),
+		CreatedAt: now,
 	}
 	for target != 0 {
 		// stop if there are no eligible workers to steal from, if the worker with the most shards is the requester,
 		// or if the worker with the most shards does not exceed the ideal count (nothing to steal)
 		w, _ := m.workerShardCount.Peek()
-		if w == nil || w.workerID == worker.workerID || w.activeShardCount <= ideal {
+		if w == nil || w.WorkerID == worker.WorkerID || w.ActiveShardCount <= ideal {
 			break
 		}
-		for _, v := range w.assignments {
-			if v.reassignmentRequest == nil {
-				v.reassignmentRequest = &reassignmentRequest{createdAt: time.Now(), shardState: v}
-				ro.shards[w] = append(ro.shards[w], v.shard)
+		for _, v := range w.Assignments {
+			if v.ReassignmentRequest == nil {
+				v.ReassignmentRequest = &reassignmentRequest{CreatedAt: time.Now(), ShardState: v}
+				ro.Shards[w] = append(ro.Shards[w], v.Shard)
 				target--
-				w.activeShardCount--
-				m.workerShardCount.Push(w, float64(w.activeShardCount))
+				w.ActiveShardCount--
+				m.workerShardCount.Push(w, float64(w.ActiveShardCount))
 				break
 			}
 		}
 	}
-	if len(ro.shards) > 0 {
-		worker.reassignmentOffer = ro
+	if len(ro.Shards) > 0 {
+		worker.ReassignmentOffer = ro
 	}
 }
 
@@ -398,24 +399,37 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 		return res, nil
 	}
 
+	ctx := context.Background()
 	// Store checkpoint in KVS
 	// This is performed without holding the lock to prevent holding up
 	// assignments and other checkpoints
-	txn := m.kvs.Txn(context.Background())
+	txn := m.kvs.Txn(ctx)
 
-	cmps := make([]clientv3.Cmp, 2)
-	assignmentKey := fmt.Sprintf("%s-assignment-id", request.ShardID)
+	assignmentKey := fmt.Sprintf("assignments/%s-assignment-id", request.ShardID)
 	assignmentID := fmt.Sprintf("%d", request.AssignmentID)
-	cmps[0] = clientv3.Compare(clientv3.CreateRevision(assignmentKey), "=", 0)
-	cmps[1] = clientv3.Compare(clientv3.Value(assignmentKey), "=", assignmentID)
+	newKey := clientv3.Compare(clientv3.CreateRevision(assignmentKey), "=", 0)
+	ownedKey := clientv3.Compare(clientv3.Value(assignmentKey), "=", assignmentID)
 
 	putAssignmentID := clientv3.OpPut(assignmentKey, assignmentID)
-	putCheckpoint := clientv3.OpPut(request.ShardID, request.SequenceNumber)
+	checkpointKey := fmt.Sprintf("checkpoints/%s", request.ShardID)
+	putCheckpoint := clientv3.OpPut(checkpointKey, request.SequenceNumber)
 
-	_, err := txn.If(cmps...).Then(putAssignmentID, putCheckpoint).Commit()
+	resp, err := txn.If(newKey).Then(putAssignmentID, putCheckpoint).Commit()
 	if err != nil {
 		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
 		return nil, err
+	}
+	if !resp.Succeeded {
+		txn := m.kvs.Txn(ctx)
+		resp, err = txn.If(ownedKey).Then(putAssignmentID, putCheckpoint).Commit()
+	}
+	if err != nil {
+		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
+		return nil, err
+	}
+	if !resp.Succeeded {
+		m.logger.Error("checkpoint failed", zap.String("reason", "fencing token mismatch"), zap.String("assignment-key", assignmentKey), zap.String("assignment-id", assignmentID))
+		return nil, errors.New("checkpoint failed")
 	}
 
 	// Now that we have completed updating kvs with checkpoint, update
@@ -426,7 +440,7 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 	defer m.mut.Unlock()
 
 	worker := m.workers[request.WorkerID]
-	if worker == nil || worker.assignments[request.ShardID] == nil || worker.assignments[request.ShardID].id != request.AssignmentID {
+	if worker == nil || worker.Assignments[request.ShardID] == nil || worker.Assignments[request.ShardID].ID != request.AssignmentID {
 		// Worker doesn't exist, ownership changed
 		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
@@ -435,12 +449,12 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 	m.checkpoints[request.ShardID] = request.SequenceNumber
 	if request.SequenceNumber == "CLOSED" {
 		m.logger.Info("shard closed notification received", zap.String("shard-id", request.ShardID))
-		m.closed = append(m.closed, &closeNotification{ShardID: request.ShardID, worker: worker})
+		m.closed = append(m.closed, &closeNotification{ShardID: request.ShardID, Worker: worker})
 	}
 
 	// Release the shard is it has been requested
-	assignment := worker.assignments[request.ShardID]
-	if assignment.reassignmentRequest != nil {
+	assignment := worker.Assignments[request.ShardID]
+	if assignment.ReassignmentRequest != nil {
 		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
 	return &CheckpointResponse{}, nil
@@ -454,7 +468,7 @@ func (m *ManagerService) ensureCheckpointOwnership(request *CheckpointRequest) *
 		return &CheckpointResponse{Status: status}
 	}
 	worker := m.workers[request.WorkerID]
-	if worker == nil || worker.assignments[request.ShardID] == nil || worker.assignments[request.ShardID].id != request.AssignmentID {
+	if worker == nil || worker.Assignments[request.ShardID] == nil || worker.Assignments[request.ShardID].ID != request.AssignmentID {
 		// Worker doesn't exist, ownership changed
 		return &CheckpointResponse{OwnershipChanged: true}
 	}
@@ -485,13 +499,14 @@ func (m *ManagerService) SetToInService(term int64) {
 	allShards := m.discovery.GetAll()
 	for _, shard := range allShards {
 		// ETCD client v3 has built-in retry logic
-		cp, err := m.kvs.Get(context.Background(), *shard.ShardId)
+		checkpointKey := fmt.Sprintf("checkpoints/%s", *shard.ShardId)
+		cp, err := m.kvs.Get(context.Background(), checkpointKey)
 		if err != nil {
 			m.logger.Error("failed to get checkpoint from kvs", zap.Error(err))
 			// TODO: Review this
 			panic(err)
 		}
-		if cp.Count > 0 {
+		if len(cp.Kvs) > 0 {
 			checkpoints[*shard.ShardId] = string(cp.Kvs[0].Value)
 		} else {
 			checkpoints[*shard.ShardId] = "LATEST"
@@ -574,15 +589,15 @@ func (m *ManagerService) handleStateRequest() *StateResponse {
 	workers := make([]WorkerState, 0)
 	for k, w := range m.workers {
 		var shards []ShardState
-		for _, v := range w.assignments {
-			shards = append(shards, ShardState{ShardID: *v.shard.ShardId})
+		for _, v := range w.Assignments {
+			shards = append(shards, ShardState{ShardID: *v.Shard.ShardId})
 		}
 		workers = append(workers, WorkerState{
 			WorkerID:               k,
-			NumberOfAssignedShards: w.activeShardCount,
-			AssignmentsLength:      len(w.assignments),
+			NumberOfAssignedShards: w.ActiveShardCount,
+			AssignmentsLength:      len(w.Assignments),
 			Shards:                 shards,
-			LastHeartbeat:          now.Sub(w.lastHeartbeat).String(),
+			LastHeartbeat:          now.Sub(w.LastHeartbeat).String(),
 		})
 	}
 
