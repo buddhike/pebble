@@ -19,24 +19,19 @@ import (
 )
 
 type ManagerService struct {
-	mut              *sync.Mutex
-	inService        bool
-	term             int64
-	kds              aws.Kinesis
-	kvs              KVS
-	discovery        shardDiscovery
-	cfg              *PopConfig
-	unassignedShards []*types.Shard
-	liveShards       map[string]*types.Shard
-	checkpoints      map[string]string
-	closed           []*closeNotification
-	done             chan struct{}
-	stop             chan struct{}
-	// The following fields must always be updated together and only while holding mut:
-	// - workers
-	// - workerHeartbeats
-	// - workerShardCount
-	// Any addition or removal of a worker must update all three atomically under the lock.
+	term                 int64
+	kds                  aws.Kinesis
+	kvs                  KVS
+	discovery            shardDiscovery
+	cfg                  *PopConfig
+	closed               []*closeNotification
+	done                 chan struct{}
+	stop                 chan struct{}
+	mut                  *sync.Mutex
+	checkpoints          map[string]string
+	inService            bool
+	unassignedShards     []*types.Shard
+	liveShards           map[string]*types.Shard
 	workers              map[string]*workerInfo
 	workerHeartbeats     *primitives.PriorityQueue[string]
 	workerShardCount     *primitives.PriorityQueue[*workerInfo]
@@ -145,7 +140,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := m.handleAssignRequest(&request)
+	response := m.assignOnce(&request)
 
 	res, err := json.Marshal(response)
 	if err != nil {
@@ -158,7 +153,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	w.Write(res)
 }
 
-func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResponse {
+func (m *ManagerService) assignOnce(request *AssignRequest) *AssignResponse {
 	currentTime := m.clock()
 	m.mut.Lock()
 	defer m.mut.Unlock()
@@ -172,35 +167,17 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 	m.processClosedShards()
 	worker := m.resolveActiveWorker(request.WorkerID, currentTime)
 
-	// If worker has no capacity, don't assign anything
-	// TODO: Review this design
 	if request.MaxShards == 0 {
 		return &AssignResponse{}
 	}
 
 	oldActiveShardCount := worker.activeShardCount
-	// Process due reassignment offers
-	noOfReassignments := 0
-	if worker.reassignmentOffer != nil && currentTime.Sub(worker.reassignmentOffer.createdAt) >= m.cfg.ShardReleaseTimeout() {
-		for oldWorker, shards := range worker.reassignmentOffer.shards {
-			for _, shard := range shards {
-				delete(oldWorker.assignments, *shard.ShardId)
-				worker.assignments[*shard.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: shard, worker: worker}
-				worker.activeShardCount++
-				noOfReassignments++
-			}
-		}
-		worker.reassignmentOffer = nil
-	}
+	noOfReassignments := m.acquireDueReassignments(worker, currentTime)
 
 	// Fulfill any additional capacity using unassigned pool
 	remaining := max(request.MaxShards-noOfReassignments, 0)
 	count := min(remaining, len(m.unassignedShards))
-	for _, s := range m.unassignedShards[0:count] {
-		worker.assignments[*s.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: s, worker: worker}
-		worker.activeShardCount++
-	}
-	m.unassignedShards = m.unassignedShards[count:]
+	m.assignFromUnassignedPool(count, worker)
 	m.workerShardCount.Push(worker, float64(worker.activeShardCount))
 
 	// if no shards were assigned in this round, attempt to rebalance by stealing shards from overloaded workers
@@ -301,6 +278,45 @@ func (m *ManagerService) processClosedShards() {
 	m.closed = unresolved
 }
 
+func (m *ManagerService) resolveActiveWorker(workerID string, at time.Time) *workerInfo {
+	// Must add to workers and workerHeartbeats together under lock
+	worker := m.workers[workerID]
+	if worker == nil {
+		worker = &workerInfo{
+			workerID:    workerID,
+			assignments: make(map[string]*assignment),
+		}
+		m.workers[workerID] = worker
+	}
+	worker.lastHeartbeat = at
+	m.workerHeartbeats.Push(workerID, float64(worker.lastHeartbeat.UnixMilli()))
+	return worker
+}
+
+func (m *ManagerService) acquireDueReassignments(worker *workerInfo, currentTime time.Time) int {
+	noOfReassignments := 0
+	if worker.reassignmentOffer != nil && currentTime.Sub(worker.reassignmentOffer.createdAt) >= m.cfg.ShardReleaseTimeout() {
+		for oldWorker, shards := range worker.reassignmentOffer.shards {
+			for _, shard := range shards {
+				delete(oldWorker.assignments, *shard.ShardId)
+				worker.assignments[*shard.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: shard, worker: worker}
+				worker.activeShardCount++
+				noOfReassignments++
+			}
+		}
+		worker.reassignmentOffer = nil
+	}
+	return noOfReassignments
+}
+
+func (m *ManagerService) assignFromUnassignedPool(count int, worker *workerInfo) {
+	for _, s := range m.unassignedShards[0:count] {
+		worker.assignments[*s.ShardId] = &assignment{id: m.getNextAssignmentID(), shard: s, worker: worker}
+		worker.activeShardCount++
+	}
+	m.unassignedShards = m.unassignedShards[count:]
+}
+
 func (m *ManagerService) rebalance(worker *workerInfo, now time.Time) {
 	// attempt to rebalance shards by redistributing from overloaded workers to this worker, aiming for an even shard distribution
 	ideal := len(m.liveShards) / len(m.workers)
@@ -334,21 +350,6 @@ func (m *ManagerService) rebalance(worker *workerInfo, now time.Time) {
 	if len(ro.shards) > 0 {
 		worker.reassignmentOffer = ro
 	}
-}
-
-func (m *ManagerService) resolveActiveWorker(workerID string, at time.Time) *workerInfo {
-	// Must add to workers and workerHeartbeats together under lock
-	worker := m.workers[workerID]
-	if worker == nil {
-		worker = &workerInfo{
-			workerID:    workerID,
-			assignments: make(map[string]*assignment),
-		}
-		m.workers[workerID] = worker
-	}
-	worker.lastHeartbeat = at
-	m.workerHeartbeats.Push(workerID, float64(worker.lastHeartbeat.UnixMilli()))
-	return worker
 }
 
 func (m *ManagerService) getNextAssignmentID() int64 {
