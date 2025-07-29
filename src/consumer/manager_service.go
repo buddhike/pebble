@@ -387,6 +387,7 @@ func (m *ManagerService) rebalance(worker *workerInfo, now time.Time) {
 
 func (m *ManagerService) getNextAssignmentID() int64 {
 	offset := m.nextAssignmentOffset
+	m.nextAssignmentOffset++
 	return m.term + offset
 }
 
