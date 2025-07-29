@@ -3,7 +3,6 @@ package consumer
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,24 +19,50 @@ import (
 )
 
 type ManagerService struct {
-	term                 int64
-	kds                  aws.Kinesis
-	kvs                  KVS
-	discovery            shardDiscovery
-	cfg                  *PopConfig
-	closed               []*closeNotification
-	done                 chan struct{}
-	stop                 chan struct{}
-	mut                  *sync.Mutex
-	checkpoints          map[string]string
-	inService            bool
-	unassignedShards     []*types.Shard
-	liveShards           map[string]*types.Shard
-	workers              map[string]*workerInfo
-	workerHeartbeats     *primitives.PriorityQueue[string]
-	workerShardCount     *primitives.PriorityQueue[*workerInfo]
-	logger               *zap.Logger
-	clock                func() time.Time
+	term      int64
+	kds       aws.Kinesis
+	kvs       KVS
+	discovery shardDiscovery
+	cfg       *PopConfig
+	closed    []*closeNotification
+	done      chan struct{}
+	stop      chan struct{}
+	logger    *zap.Logger
+	clock     func() time.Time
+	// All fields below this point the mutable state
+	// and must be syncrhonized via mut
+	mut *sync.Mutex
+	// Indicates whether Manager is in service or not
+	inService bool
+	// Current checkpoints by shard id
+	checkpoints map[string]string
+	// Unassigned shards
+	// Initialised with all root shards in a stream
+	// Root shard is a shard without a parent,
+	// or an expired parent and check point is
+	// not CLOSED.
+	// Checkpoint is CLOSED when all records
+	// in the shard are processed and it has
+	// either split or merged
+	unassignedShards []*types.Shard
+	// Live shards are shards that are currently
+	// assigned or unassigned
+	// Live shards indicate the size of total work
+	// to be done
+	liveShards map[string]*types.Shard
+	// Keeps track of workers by their ID
+	workers map[string]*workerInfo
+	// Used to find the worker with the oldest heartbeat
+	workerHeartbeats *primitives.PriorityQueue[string]
+	// Used to find worker with most number of active shards
+	// Active shard is a shard assigned to a worker and it
+	// does not have an associated reassignment request
+	workerShardCount *primitives.PriorityQueue[*workerInfo]
+	// Monotonically increasing assignment offset
+	// Assignment ID is calculated by adding this offset to
+	// manager's term
+	// Manager's term is also monotonically increasing in the
+	// cluster during leader election
 	nextAssignmentOffset int64
 }
 
@@ -47,8 +72,15 @@ type shardDiscovery interface {
 	GetChildren(string) []*types.Shard
 }
 
+// Used to track a list of shards reassigned to
+// a worker
 type reassignmentOffer struct {
-	Shards    map[*workerInfo][]*types.Shard
+	// Reassigned shards keyed by current owner
+	Shards map[*workerInfo][]*types.Shard
+	// Used to check if reassignment is due
+	// When a reassignment is due, assignments
+	// are removed from the old worker and
+	// assigned to current worker
 	CreatedAt time.Time
 }
 
@@ -400,36 +432,34 @@ func (m *ManagerService) handleCheckpointRequest(request *CheckpointRequest) (*C
 	}
 
 	ctx := context.Background()
-	// Store checkpoint in KVS
-	// This is performed without holding the lock to prevent holding up
-	// assignments and other checkpoints
-	txn := m.kvs.Txn(ctx)
 
 	assignmentKey := fmt.Sprintf("assignments/%s-assignment-id", request.ShardID)
-	assignmentID := fmt.Sprintf("%d", request.AssignmentID)
-	newKey := clientv3.Compare(clientv3.CreateRevision(assignmentKey), "=", 0)
-	ownedKey := clientv3.Compare(clientv3.Value(assignmentKey), "=", assignmentID)
+	assignmentID := fmt.Sprintf("%020d", request.AssignmentID)
+	firstAssignment := clientv3.Compare(clientv3.CreateRevision(assignmentKey), "=", 0)
+	currentAssignment := clientv3.Compare(clientv3.Value(assignmentKey), "=", assignmentID)
+	newAssignment := clientv3.Compare(clientv3.Value(assignmentKey), "<", assignmentID)
+	conds := []clientv3.Cmp{currentAssignment, firstAssignment, newAssignment}
 
 	putAssignmentID := clientv3.OpPut(assignmentKey, assignmentID)
 	checkpointKey := fmt.Sprintf("checkpoints/%s", request.ShardID)
 	putCheckpoint := clientv3.OpPut(checkpointKey, request.SequenceNumber)
 
-	resp, err := txn.If(newKey).Then(putAssignmentID, putCheckpoint).Commit()
-	if err != nil {
-		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
-		return nil, err
-	}
-	if !resp.Succeeded {
+	var checkpointSucceeded bool
+	for _, cond := range conds {
 		txn := m.kvs.Txn(ctx)
-		resp, err = txn.If(ownedKey).Then(putAssignmentID, putCheckpoint).Commit()
+		resp, err := txn.If(cond).Then(putAssignmentID, putCheckpoint).Commit()
+		if err != nil {
+			m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
+			return nil, err
+		}
+		checkpointSucceeded = resp.Succeeded
+		if checkpointSucceeded {
+			break
+		}
 	}
-	if err != nil {
-		m.logger.Error("error putting checkpoint in etcd", zap.Error(err))
-		return nil, err
-	}
-	if !resp.Succeeded {
+	if !checkpointSucceeded {
 		m.logger.Error("checkpoint failed", zap.String("reason", "fencing token mismatch"), zap.String("assignment-key", assignmentKey), zap.String("assignment-id", assignmentID))
-		return nil, errors.New("checkpoint failed")
+		return &CheckpointResponse{OwnershipChanged: true}, nil
 	}
 
 	// Now that we have completed updating kvs with checkpoint, update
