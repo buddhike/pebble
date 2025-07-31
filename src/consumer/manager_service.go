@@ -371,7 +371,7 @@ func (m *ManagerService) rebalance(worker *workerInfo, now time.Time) {
 		}
 		for _, v := range w.Assignments {
 			if v.ReassignmentRequest == nil {
-				v.ReassignmentRequest = &reassignmentRequest{CreatedAt: time.Now(), ShardState: v}
+				v.ReassignmentRequest = &reassignmentRequest{CreatedAt: m.clock(), ShardState: v}
 				ro.Shards[w] = append(ro.Shards[w], v.Shard)
 				target--
 				w.ActiveShardCount--
