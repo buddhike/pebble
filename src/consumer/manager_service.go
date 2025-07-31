@@ -173,7 +173,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	response := m.assignOnce(&request)
+	response := m.handleAssignRequest(&request)
 
 	res, err := json.Marshal(response)
 	if err != nil {
@@ -186,7 +186,7 @@ func (m *ManagerService) Assign(w http.ResponseWriter, r *http.Request) {
 	w.Write(res)
 }
 
-func (m *ManagerService) assignOnce(request *AssignRequest) *AssignResponse {
+func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResponse {
 	currentTime := m.clock()
 	m.mut.Lock()
 	defer m.mut.Unlock()
@@ -619,15 +619,15 @@ func (m *ManagerService) handleStateRequest() *StateResponse {
 
 	workers := make([]WorkerState, 0)
 	for k, w := range m.workers {
-		var shards []ShardState
+		var assignments []AssignmentState
 		for _, v := range w.Assignments {
-			shards = append(shards, ShardState{ShardID: *v.Shard.ShardId})
+			assignments = append(assignments, AssignmentState{AssignmentID: v.ID, ShardID: *v.Shard.ShardId})
 		}
 		workers = append(workers, WorkerState{
 			WorkerID:               k,
 			NumberOfAssignedShards: w.ActiveShardCount,
 			AssignmentsLength:      len(w.Assignments),
-			Shards:                 shards,
+			Assignments:            assignments,
 			LastHeartbeat:          now.Sub(w.LastHeartbeat).String(),
 		})
 	}
