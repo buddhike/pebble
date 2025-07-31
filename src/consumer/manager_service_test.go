@@ -24,7 +24,7 @@ func TestAssignAllShardsToWorker(t *testing.T) {
 		MaxShards: 1,
 	})
 
-	assert.Equal(t, r.Assignments[0].ShardID, "shard-0")
+	assert.Equal(t, r.Assignments[0].ShardID, "s0")
 }
 
 func TestAssignToAWorkerWithoutCapacity(t *testing.T) {
@@ -44,11 +44,11 @@ func TestAssignAfterInactivityPeriod(t *testing.T) {
 	defer w.CleanUp()
 
 	r1 := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 1})
-	w.AdvanceTimeBySeconds(10)
+	w.ExpireInactiveWorkers()
 	r2 := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 2})
 
-	assert.Equal(t, "shard-0", r1.Assignments[0].ShardID)
-	assert.Equal(t, "shard-0", r2.Assignments[0].ShardID)
+	assert.Equal(t, "s0", r1.Assignments[0].ShardID)
+	assert.Equal(t, "s0", r2.Assignments[0].ShardID)
 	assert.Greater(t, r2.Assignments[0].ID, r1.Assignments[0].ID)
 }
 
@@ -57,26 +57,122 @@ func TestAssignWhenThereAreMoreWorkersThanShards(t *testing.T) {
 	defer w.CleanUp()
 
 	// Worker a is assigned a shard
-	r1 := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 1})
-	// Worker b should not get any shards
-	r2 := svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
-	// Move the world so that shard release timeouts expire
-	w.AdvanceTimeBySeconds(3)
-	// Worker b should not get any shards
-	r3 := svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	r := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 1})
+	assert.Equal(t, "s0", r.Assignments[0].ShardID)
 
-	assert.Equal(t, "shard-0", r1.Assignments[0].ShardID)
-	assert.Empty(t, r2.Assignments)
+	// Worker b should not get any shards
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Empty(t, r.Assignments)
+
+	w.ExpireShardReleaseTimeout()
+	r3 := svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
 	assert.Empty(t, r3.Assignments)
+}
+
+func TestAssignWhenWorkersAreNotBalanced(t *testing.T) {
+	svc, w := newTestSubject("s0", "s1")
+	defer w.CleanUp()
+
+	r := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 2})
+	assert.Equal(t, "s0", r.Assignments[0].ShardID)
+	assert.Equal(t, "s1", r.Assignments[1].ShardID)
+
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Empty(t, r.Assignments)
+
+	w.ExpireShardReleaseTimeout()
+
+	// a gets initial assignment if it calls assign before b
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 4})
+	assert.Equal(t, 2, len(r.Assignments))
+
+	// b acquires any reassigned shards
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Equal(t, 1, len(r.Assignments))
+	assert.Equal(t, "s0", r.Assignments[0].ShardID)
+
+	// a should now receive the remaining assignment
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 4})
+	assert.Equal(t, 1, len(r.Assignments))
+	assert.Equal(t, "s1", r.Assignments[0].ShardID)
+}
+
+func TestAssignWhenWorkerBecomesInactiveBeforeItAcquiresReassignments(t *testing.T) {
+	svc, w := newTestSubject("s0", "s1")
+	defer w.CleanUp()
+
+	r := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 2})
+	assert.Equal(t, "s0", r.Assignments[0].ShardID)
+	assert.Equal(t, "s1", r.Assignments[1].ShardID)
+
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Empty(t, r.Assignments)
+
+	w.ExpireShardReleaseTimeout()
+
+	// ensure a keeps heartbeating
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 4})
+	assert.Len(t, r.Assignments, 2)
+
+	w.ExpireInactiveWorkers()
+
+	// a re-acquires the shard that was offerred to b
+	r2 := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 4})
+	assert.Len(t, r2.Assignments, 2)
+	assert.Greater(t, r2.Assignments[0].ID, r.Assignments[0].ID)
+
+	// b should not acquire any reassignments
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Len(t, r.Assignments, 0)
+}
+
+func TestAssignWhenWorkerReactivatesBeforePreviousReassignmentOfferIsClearedByAnotherWorker(t *testing.T) {
+	svc, w := newTestSubject("s0", "s1")
+	defer w.CleanUp()
+
+	r := svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 2})
+	assert.Equal(t, "s0", r.Assignments[0].ShardID)
+	assert.Equal(t, "s1", r.Assignments[1].ShardID)
+
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Empty(t, r.Assignments)
+
+	w.ExpireShardReleaseTimeout()
+
+	// ensure a keeps heartbeating
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 4})
+	assert.Len(t, r.Assignments, 2)
+
+	w.ExpireInactiveWorkers()
+
+	// b should not acquire any reassignments
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "b", MaxShards: 1})
+	assert.Len(t, r.Assignments, 1)
+
+	// a should see the rebalanced assignments
+	r = svc.handleAssignRequest(&AssignRequest{WorkerID: "a", MaxShards: 4})
+	assert.Len(t, r.Assignments, 1)
 }
 
 type testWorld struct {
 	CleanUp              func()
 	AdvanceTime          func(by time.Duration)
 	AdvanceTimeBySeconds func(s int)
+	GetEpoc              func() int
+}
+
+func (w *testWorld) ExpireShardReleaseTimeout() {
+	w.AdvanceTimeBySeconds(3)
+}
+
+func (w *testWorld) ExpireInactiveWorkers() {
+	epoc := w.GetEpoc()
+	target := (epoc + 5) - ((epoc + 5) % 5)
+	w.AdvanceTimeBySeconds(target - epoc)
 }
 
 func newTestSubject(shardIds ...string) (*ManagerService, *testWorld) {
+	epoc := 0
 	clock := time.Time{}
 	popCfg := &PopConfig{
 		WorkerInactivityTimeoutMilliseconds: 5000,
@@ -105,6 +201,10 @@ func newTestSubject(shardIds ...string) (*ManagerService, *testWorld) {
 		},
 		AdvanceTimeBySeconds: func(s int) {
 			clock = clock.Add(time.Second * time.Duration(s))
+			epoc += s
+		},
+		GetEpoc: func() int {
+			return epoc
 		},
 	}
 }
@@ -136,7 +236,7 @@ func newMockKinesis(shardIds ...string) *mockKinesis {
 	if len(shards) == 0 {
 		shards = []types.Shard{
 			{
-				ShardId: aws.String("shard-0"),
+				ShardId: aws.String("s0"),
 			},
 		}
 	}
