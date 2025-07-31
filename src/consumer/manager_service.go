@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -223,6 +224,11 @@ func (m *ManagerService) handleAssignRequest(request *AssignRequest) *AssignResp
 		sn := m.checkpoints[*a.Shard.ShardId]
 		assignments = append(assignments, Assignment{ID: a.ID, ShardID: *a.Shard.ShardId, SequenceNumber: sn})
 	}
+
+	// Make sure the result is stable
+	slices.SortFunc(assignments, func(a, b Assignment) int {
+		return strings.Compare(a.ShardID, b.ShardID)
+	})
 
 	return &AssignResponse{
 		Assignments: assignments,
