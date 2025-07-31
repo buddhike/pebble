@@ -261,13 +261,14 @@ func (m *ManagerService) releaseInactiveWorkers(at time.Time) {
 		// Move any shards offerred as part of a reassignment offer
 		// back to unassigned pool
 		if leastActiveWorker.ReassignmentOffer != nil {
-			for _, shards := range leastActiveWorker.ReassignmentOffer.Shards {
+			for oldWorker, shards := range leastActiveWorker.ReassignmentOffer.Shards {
 				for _, s := range shards {
 					_, released := releasedSet[*s.ShardId]
 					if !released {
 						m.unassignedShards = append(m.unassignedShards, s)
 						releasedSet[*s.ShardId] = struct{}{}
 					}
+					delete(oldWorker.Assignments, *s.ShardId)
 				}
 			}
 		}
