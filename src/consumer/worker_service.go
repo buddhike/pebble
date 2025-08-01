@@ -72,154 +72,148 @@ func (w *WorkerService) Start() {
 	go func() {
 		defer close(w.done)
 
+		err := w.assignOnce()
+		if err != nil {
+			w.logger.Error("error invoking assign", zap.Error(err), zap.String("current-manager", w.currentManager()))
+			w.rotateManager()
+		}
+
 		for {
 			select {
 			case <-w.stop:
 				w.logger.Info("worker is stopped")
+				for _, p := range w.shardProcessors {
+					close(p.Stop)
+				}
+				for _, p := range w.shardProcessors {
+					<-p.Done
+				}
 				return
-			default:
-				// Create assign request
-				assignReq := AssignRequest{
-					WorkerID:  w.cfg.ID,
-					MaxShards: w.maxShards,
-				}
-
-				// Marshal request to JSON
-				reqBody, err := json.Marshal(assignReq)
+			case <-time.After(w.cfg.HealthcheckTimeout()):
+				err := w.assignOnce()
 				if err != nil {
-					w.logger.Error("failed to marshal assign request", zap.Error(err))
-					select {
-					case <-w.stop:
-						w.logger.Info("worker is stopped while awiting retry assign request")
-						return
-					case <-time.After(w.cfg.HealthcheckTimeout()):
-						continue
-					}
-				}
-
-				// Make HTTP request to manager
-				resp, err := http.Post(fmt.Sprintf("%s/assign/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
-				if err != nil {
-					w.logger.Error("failed to make assign request", zap.Error(err))
+					w.logger.Error("error invoking assign", zap.Error(err), zap.String("current-manager", w.currentManager()))
 					w.rotateManager()
-					select {
-					case <-w.stop:
-						w.logger.Info("shutting down worker")
-						return
-					case <-time.After(w.cfg.HealthcheckTimeout()):
-						continue
-					}
-				}
-
-				// Read response body
-				respBody, err := io.ReadAll(resp.Body)
-				resp.Body.Close()
-				if err != nil {
-					w.logger.Error("failed to read response body", zap.Error(err))
-					select {
-					case <-w.stop:
-						w.logger.Info("shutting down worker")
-						return
-					case <-time.After(w.cfg.HealthcheckTimeout()):
-						continue
-					}
-				}
-
-				// Unmarshal response
-				var assignResp AssignResponse
-				err = json.Unmarshal(respBody, &assignResp)
-				if err != nil {
-					w.logger.Info("failed to unmarshal assign response", zap.Error(err), zap.String("assign_response", string(respBody)))
-					select {
-					case <-w.stop:
-						w.logger.Info("shutting down worker")
-						return
-					case <-time.After(w.cfg.HealthcheckTimeout()):
-						continue
-					}
-				}
-
-				if assignResp.Status.NotInService {
-					w.rotateManager()
-				}
-
-				// Check if we got any assignments
-				if len(assignResp.Assignments) > 0 {
-					lt := make(map[string]*Assignment)
-					start := make([]*shardProcessor, 0)
-					stop := make([]*shardProcessor, 0)
-					// Evaluate what we need to start
-					for _, a := range assignResp.Assignments {
-						lt[a.ShardID] = &a
-						p := w.shardProcessors[a.ShardID]
-						if p == nil {
-							start = append(start, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
-						}
-						// We check if a shard processor already exists for the assignment (p != nil)
-						// and if the assignment id has changed (p.Assignment.ID != a.ID).
-						// this means the assignment for the shard has changed (e.g., due to reassignment or failover),
-						// so we need to stop the old processor and start a new one with the updated assignment.
-						// this ensures that the worker is always processing the correct assignment for each shard,
-						// and prevents processing with stale or incorrect assignment information.
-						if p != nil && p.Assignment.ID != a.ID {
-							stop = append(stop, p)
-							start = append(start, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
-						}
-					}
-					// Evaluate which shard processors to stop
-					for k, v := range w.shardProcessors {
-						if lt[k] == nil {
-							stop = append(stop, v)
-						}
-					}
-					// Keep track of the new processors
-					for _, s := range start {
-						w.shardProcessors[s.Assignment.ShardID] = s
-					}
-					// Make liveness visibile to go routines processing shards
-					w.mut.Lock()
-					w.lastHeartbeatTime = time.Now()
-					w.mut.Unlock()
-					// Start new processors
-					for _, p := range start {
-						w.logger.Info("processing shard", zap.String("shard id", p.Assignment.ShardID))
-						go w.processShard(p)
-					}
-					// Stop processors no longer owned in a non-blocking manner
-					for _, s := range stop {
-						w.logger.Info("releasing shard", zap.String("shard id", s.Assignment.ShardID))
-						delete(w.shardProcessors, s.Assignment.ShardID)
-						go func() {
-							close(s.Stop)
-							<-s.Done
-						}()
-					}
-					if len(start) > 0 {
-						w.maxShards = w.maxShards * 2
-						// reset if we wrap around int bounds
-						if w.maxShards < 0 {
-							w.maxShards = 1
-						}
-					}
-				}
-
-				// Wait before next request with stop signal handling
-				select {
-				case <-w.stop:
-					w.logger.Info("shutting down worker")
-					for _, p := range w.shardProcessors {
-						close(p.Stop)
-					}
-					for _, p := range w.shardProcessors {
-						<-p.Done
-					}
-					return
-				case <-time.After(w.cfg.HealthcheckTimeout()):
-					// Continue to next iteration
 				}
 			}
 		}
 	}()
+}
+
+func (w *WorkerService) assignOnce() error {
+	// Create assign request
+	assignReq := AssignRequest{
+		WorkerID:  w.cfg.ID,
+		MaxShards: w.maxShards,
+	}
+
+	// Marshal request to JSON
+	reqBody, err := json.Marshal(assignReq)
+	if err != nil {
+		panic(err)
+	}
+
+	// Make HTTP request to manager
+	resp, err := http.Post(fmt.Sprintf("%s/assign/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		return fmt.Errorf("failed send assign request: %w", err)
+	}
+
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		panic(fmt.Errorf("unexpected http response status for assign request: %d", resp.StatusCode))
+	}
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("unexpected http response code for assign request: %d", resp.StatusCode)
+	}
+
+	// Read response body
+	respBody, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		return fmt.Errorf("failed to read assign response body: %w", err)
+	}
+
+	// Unmarshal response
+	var assignResp AssignResponse
+	err = json.Unmarshal(respBody, &assignResp)
+	if err != nil {
+		w.logger.Info("failed to unmarshal assign response", zap.Error(err), zap.String("assign_response", string(respBody)))
+		return fmt.Errorf("failed to unmarshal assign response: %w", err)
+	}
+
+	if assignResp.Status.NotInService {
+		w.rotateManager()
+		return nil
+	}
+
+	if len(assignResp.Assignments) > 0 {
+		lt := make(map[string]*Assignment)
+		start := make([]*shardProcessor, 0)
+		stop := make([]*shardProcessor, 0)
+		restart := make([]*shardProcessor, 0)
+		// Evaluate what we need to start
+		for _, a := range assignResp.Assignments {
+			lt[a.ShardID] = &a
+			p := w.shardProcessors[a.ShardID]
+			if p == nil {
+				start = append(start, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
+			}
+			// We check if a shard processor already exists for the assignment (p != nil)
+			// and if the assignment id has changed (p.Assignment.ID < a.ID).
+			// this means the assignment for the shard has changed (e.g., due to reassignment or failover),
+			// so we need to stop the old processor and start a new one with the updated assignment.
+			// this ensures that the worker is always processing the correct assignment for each shard,
+			// and prevents processing with stale or incorrect assignment information.
+			if p != nil && p.Assignment.ID < a.ID {
+				restart = append(restart, &shardProcessor{Assignment: &a, Done: make(chan struct{}), Stop: make(chan struct{})})
+			}
+		}
+		// Evaluate which shard processors to stop
+		for k, v := range w.shardProcessors {
+			if lt[k] == nil {
+				stop = append(stop, v)
+			}
+		}
+		// Make liveness visibile to go routines processing shards
+		w.mut.Lock()
+		w.lastHeartbeatTime = time.Now()
+		w.mut.Unlock()
+		// Start new processors
+		for _, p := range start {
+			w.shardProcessors[p.Assignment.ShardID] = p
+			w.logger.Info("starting new shard processor", zap.String("shard-id", p.Assignment.ShardID), zap.Int64("assignment-id", p.Assignment.ID))
+			go w.processShard(p)
+		}
+		// Restart processors
+		for _, p := range restart {
+			current := w.shardProcessors[p.Assignment.ShardID]
+			w.shardProcessors[p.Assignment.ShardID] = p
+			go func() {
+				w.logger.Info("restarting shard processor", zap.String("shard-id", p.Assignment.ShardID), zap.Int64("old-assignment-id", p.Assignment.ID), zap.Int64("new-assignment-id", p.Assignment.ID))
+				close(current.Stop)
+				<-current.Done
+				w.processShard(p)
+			}()
+		}
+		// Stop processors no longer owned
+		for _, s := range stop {
+			w.logger.Info("stopping shard processor", zap.String("shard id", s.Assignment.ShardID), zap.Int64("assignment-id", s.Assignment.ID))
+			delete(w.shardProcessors, s.Assignment.ShardID)
+			go func() {
+				close(s.Stop)
+				<-s.Done
+			}()
+		}
+
+		if len(start) > 0 {
+			w.maxShards = w.maxShards * 2
+			// reset if we wrap around int bounds
+			if w.maxShards < 0 {
+				w.maxShards = 1
+			}
+		}
+	}
+	return nil
 }
 
 func (w *WorkerService) processShard(p *shardProcessor) {
@@ -293,18 +287,18 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 		case event, ok := <-eventStream:
 
 			if !ok {
-				log.Printf("Event stream closed for shard %s", assignment.ShardID)
+				log.Printf("event stream closed for shard %s", assignment.ShardID)
 				return true, sn // ok to resubscribe
 			}
 
 			if event == nil {
-				log.Printf("Error in shard subscription %s", assignment.ShardID)
+				log.Printf("error in shard subscription %s", assignment.ShardID)
 				return false, ""
 			}
 
 			evt := event.(*types.SubscribeToShardEventStreamMemberSubscribeToShardEvent)
 			if evt == nil {
-				log.Printf("Unexpected event type")
+				log.Printf("unexpected event type")
 				return false, ""
 			}
 
@@ -335,13 +329,21 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 
 			reqBody, err := json.Marshal(checkpointReq)
 			if err != nil {
-				w.logger.Error("failed to marshal checkpoint request", zap.Error(err))
-				continue
+				panic(err)
 			}
 
 			resp, err := http.Post(fmt.Sprintf("%s/checkpoint/", w.currentManager()), "application/json", bytes.NewBuffer(reqBody))
 			if err != nil {
 				w.logger.Error("failed to send checkpoint request", zap.Error(err))
+				continue
+			}
+
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				panic(fmt.Errorf("unexpected http response status for checkpoint request: %d", resp.StatusCode))
+			}
+
+			if resp.StatusCode != 200 {
+				w.logger.Info("unexpected http response status for checkpoint request", zap.String("shard-id", assignment.ShardID), zap.Int64("assignment-id", assignment.ID), zap.Int("status-code", resp.StatusCode))
 				continue
 			}
 
@@ -355,34 +357,30 @@ func (w *WorkerService) handleSubscription(output *kinesis.SubscribeToShardOutpu
 			var checkpointResp CheckpointResponse
 			err = json.Unmarshal(respBody, &checkpointResp)
 			if err != nil {
-				w.logger.Error("failed to unmarshal checkpoint response: %v", zap.Error(err))
-				continue
+				panic(fmt.Errorf("failed to unmarshal checkpoint response: %w", err))
 			}
 
 			if checkpointResp.OwnershipChanged {
-				w.logger.Info("ownership changed", zap.String("ShardID", assignment.ShardID))
+				w.logger.Info("ownership changed", zap.String("shard-id", assignment.ShardID), zap.Int64("assignment-id", assignment.ID))
 				eventStream = nil
 				break
 			}
 
 			if sn == "CLOSED" {
-				w.logger.Info("shard closed", zap.String("shard-id", assignment.ShardID))
+				w.logger.Info("shard closed", zap.String("shard-id", assignment.ShardID), zap.Int64("assignment-id", assignment.ID))
 				eventStream = nil
 				break
 			}
 
 			if checkpointResp.NotInService {
-				w.logger.Info("manager not in service, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
+				w.logger.Info("manager not in service, stopping processing of shard", zap.String("ShardID", assignment.ShardID), zap.Int64("assignment-id", assignment.ID))
 				return false, sn
 			}
 
 			lastCheckpointTime = now
-			w.logger.Info("successfully checkpointed shard", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", sn))
+			w.logger.Info("checkpoint completed", zap.String("shard-id", assignment.ShardID), zap.String("SequenceNumber", sn), zap.Int64("assignment-id", assignment.ID))
 		case <-p.Stop:
-			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
-			return false, ""
-		case <-w.stop:
-			w.logger.Info("received stop signal, stopping processing of shard", zap.String("ShardID", assignment.ShardID))
+			w.logger.Info("stopped shard processor", zap.String("ShardID", assignment.ShardID), zap.Int64("assignment-id", assignment.ID))
 			return false, ""
 		}
 	}
