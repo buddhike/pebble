@@ -26,6 +26,7 @@ type ShardDiscoveryService struct {
 	stop        chan struct{}
 	initialised chan struct{}
 	logger      *zap.Logger
+	timer       func(time.Duration) <-chan time.Time
 }
 
 func NewShardDiscoveryService(cfg *PopConfig, kds aws.Kinesis, stop chan struct{}, logger *zap.Logger) *ShardDiscoveryService {
@@ -38,6 +39,7 @@ func NewShardDiscoveryService(cfg *PopConfig, kds aws.Kinesis, stop chan struct{
 		initialised: make(chan struct{}),
 		stop:        stop,
 		logger:      logger.Named("shard-discovery-service"),
+		timer:       time.After,
 	}
 }
 
@@ -70,7 +72,7 @@ func (svc *ShardDiscoveryService) Start() {
 			select {
 			case <-svc.stop:
 				return
-			case <-time.After(svc.cfg.ShardDiscoveryInterval()):
+			case <-svc.timer(svc.cfg.ShardDiscoveryInterval()):
 			}
 		}
 	}()
