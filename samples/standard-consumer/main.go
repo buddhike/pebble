@@ -9,6 +9,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/service/kinesis/types"
 	"github.com/buddhike/pebble/consumer"
+	"go.uber.org/zap"
 )
 
 var (
@@ -30,7 +31,8 @@ func main() {
 		fmt.Printf("Processing record: %s\n", *record.PartitionKey)
 	}
 
-	c := consumer.MustNewConsumer("my-consumer", streamName, streamConsumerArn, popURLs, processFn)
+	logger := zap.Must(zap.NewDevelopment())
+	c := consumer.MustNewConsumer("my-consumer", streamName, streamConsumerArn, popURLs, processFn, consumer.WithCheckpointInterval(100), consumer.WithLogger(logger))
 
 	// Start the consumer
 	err := c.Start()

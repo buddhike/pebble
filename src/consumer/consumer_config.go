@@ -19,6 +19,7 @@ type ConsumerConfig struct {
 	HealthcheckTimeoutMilliseconds      int
 	WorkerInactivityTimeoutMilliseconds int
 	CheckpointIntervalMilliseconds      int
+	CheckpointRetryIntervalMilliseconds int
 	StandaloneConsumer                  bool
 	logger                              *zap.Logger
 }
@@ -33,6 +34,10 @@ func (cfg *ConsumerConfig) WorkerInactivityTimeout() time.Duration {
 
 func (cfg *ConsumerConfig) CheckpointInterval() time.Duration {
 	return time.Duration(cfg.CheckpointIntervalMilliseconds) * time.Millisecond
+}
+
+func (cfg *ConsumerConfig) CheckpointRetryInterval() time.Duration {
+	return time.Duration(cfg.CheckpointRetryIntervalMilliseconds) * time.Millisecond
 }
 
 func WithKinesisClient(kds *kinesis.Client) func(*ConsumerConfig) {

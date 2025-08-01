@@ -33,6 +33,7 @@ func MustNewConsumer(name, streamName, efoConsumerArn, popUrls string, processFn
 		HealthcheckTimeoutMilliseconds:      1000,
 		WorkerInactivityTimeoutMilliseconds: 5000,
 		CheckpointIntervalMilliseconds:      60000,
+		CheckpointRetryIntervalMilliseconds: 1000,
 	}
 
 	for _, opt := range opts {
